@@ -119,17 +119,16 @@ public class AgentLoop {
             prompt.append("- ").append(tool.name()).append("：").append(tool.description()).append('\n');
         }
 
+        // 这里刻意不给出可以直接照抄的示例行：早先的版本用「参数名: 参数值」当模板，
+        // 结果模型把这一行也当成内容写进了参数里，白白浪费一次调用。
         prompt.append("\n请严格按下面的格式回复，每次只输出一个动作。\n");
-        prompt.append("调用工具时：\n");
-        prompt.append("THOUGHT: 你这一步的思路（一行）\n");
-        prompt.append("TOOL: 工具名\n");
-        prompt.append("参数名: 参数值\n\n");
-        prompt.append("参数名用全大写英文（例如 PATH、CONTENT），一个参数占一行；\n");
-        prompt.append("参数值如果有多行（比如一整个文件的内容），就从参数名那一行的下一行开始写，\n");
-        prompt.append("一直写到下一个参数名为止。\n\n");
-        prompt.append("任务完成时：\n");
-        prompt.append("THOUGHT: 你的结论\n");
-        prompt.append("FINAL: 给用户看的最终答复\n");
+        prompt.append("要调用工具时，回复由若干行组成：第一行以 THOUGHT 加冒号开头，写你这一步的思路；"
+                + "第二行以 TOOL 加冒号开头，写工具名；之后每个参数占一行，"
+                + "行首是参数名（全大写英文，例如 PATH、CONTENT）加冒号，后面跟参数值。\n");
+        prompt.append("参数值可以有多行（比如一整个文件的内容）：从参数名那一行的下一行开始写，"
+                + "一直写到下一个参数名为止。\n");
+        prompt.append("任务完成时不要输出 TOOL 行，改为两行：第一行以 THOUGHT 加冒号写结论，"
+                + "第二行以 FINAL 加冒号写给用户看的最终答复。\n");
 
         if (!transcript.isEmpty()) {
             prompt.append("\n到目前为止的进展：\n");
