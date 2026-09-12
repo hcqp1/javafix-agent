@@ -76,11 +76,20 @@ public class Main {
         System.out.println("任务：" + task);
         System.out.println("模型：" + model);
 
+        long startedAt = System.nanoTime();
+
         try {
             String answer = loop.run(task);
             System.out.println("\n=== Agent 的结论 ===");
             System.out.println(answer);
         } finally {
+            long elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000;
+
+            System.out.println("\n=== 本次运行的度量 ===");
+            System.out.println("步数：" + loop.transcript().size());
+            System.out.println("耗时：" + elapsedMillis + " ms");
+            System.out.println("token：" + llmClient.usage());
+
             // 无论成功失败都把轨迹打出来——Agent 出错时，轨迹是唯一的线索
             System.out.println("\n=== 运行轨迹 ===");
             loop.transcript().forEach(System.out::println);

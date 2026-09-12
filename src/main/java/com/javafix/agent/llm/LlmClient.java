@@ -15,4 +15,14 @@ public interface LlmClient {
      * @return 模型返回的文本
      */
     String complete(String prompt);
+
+    /**
+     * 到目前为止该客户端累计消耗的 token。
+     *
+     * <p>统计能力是可选项：测试用的假模型没有真实消耗，所以给一个默认实现，
+     * 而不是把它变成每个实现都必须回答的问题。
+     */
+    default LlmUsage usage() {
+        return LlmUsage.NONE;
+    }
 }

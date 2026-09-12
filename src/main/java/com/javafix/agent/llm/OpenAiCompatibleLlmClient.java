@@ -49,6 +49,7 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
     private final String model;
     private final Duration timeout;
     private final Duration retryBackoff;
+    private LlmUsage usage = LlmUsage.NONE;
 
     public OpenAiCompatibleLlmClient(String baseUrl, String apiKey, String model) {
         this(baseUrl, apiKey, model, DEFAULT_TIMEOUT, DEFAULT_RETRY_BACKOFF);
@@ -92,6 +93,7 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
                 );
 
                 if (response.statusCode() == 200) {
+                    recordUsage(response.body());
                     return extractContent(response.body());
                 }
 
@@ -155,6 +157,34 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
     }
 
     private String extractContent(String responseBody) {
+
+        return contentOf(responseBody);
+    }
+
+    /**
+     * 记录这次调用消耗的 token。
+     *
+     * <p>统计是附加信息，服务端没给 usage 字段、或者响应不合法时都不该影响修复任务本身，
+     * 所以这里吞掉异常，只跳过统计。
+     */
+    private void recordUsage(String responseBody) {
+        try {
+            JsonNode usageNode = mapper.readTree(responseBody).path("usage");
+            usage = usage.plus(
+                    usageNode.path("prompt_tokens").asLong(0),
+                    usageNode.path("completion_tokens").asLong(0)
+            );
+        } catch (JsonProcessingException e) {
+            // 忽略：拿不到用量不影响这一轮是否成功
+        }
+    }
+
+    /** 到目前为止累计的 token 消耗。 */
+    public LlmUsage usage() {
+        return usage;
+    }
+
+    private String contentOf(String responseBody) {
 
         JsonNode root;
         try {

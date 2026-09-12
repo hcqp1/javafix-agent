@@ -94,6 +94,20 @@ class OpenAiCompatibleLlmClientTest {
     }
 
     @Test
+    void shouldAccumulateTokenUsage() {
+
+        responses.add(new StubResponse(200, completion("FINAL: 好了")));
+
+        OpenAiCompatibleLlmClient client = client();
+        client.complete("任务");
+
+        assertEquals(1, client.usage().calls());
+        assertEquals(123, client.usage().promptTokens());
+        assertEquals(45, client.usage().completionTokens());
+        assertEquals(168, client.usage().totalTokens());
+    }
+
+    @Test
     void shouldNotRetryOnUnauthorized() {
 
         responses.add(new StubResponse(401, "{\"error\":\"invalid api key\"}"));
@@ -138,6 +152,6 @@ class OpenAiCompatibleLlmClientTest {
 
     private static String completion(String content) {
         return "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\""
-                + content + "\"}}]}";
+                + content + "\"}}],\"usage\":{\"prompt_tokens\":123,\"completion_tokens\":45}}";
     }
 }
