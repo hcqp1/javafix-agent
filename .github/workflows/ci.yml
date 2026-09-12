@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+# 同一个分支连续推送时，取消还在跑的上一次——省时间，也省额度
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # 测试里会真的启动外部进程。万一某个子进程卡住，不要让任务跑满默认的 6 小时上限
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Show toolchain
+        run: |
+          java -version
+          mvn -v
+
+      # 本地怎么验证，CI 就怎么验证：测试里有真实启动 Maven 的集成测试，
+      # 不为了跑得快而在 CI 里换一套简化版的测试。
+      - name: Run tests
+        run: mvn -B --no-transfer-progress test

@@ -1,5 +1,7 @@
 # JavaFixAgent
 
+[![CI](https://github.com/hcqp1/javafix-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/hcqp1/javafix-agent/actions/workflows/ci.yml)
+
 面向 Java 代码仓库的自主缺陷定位与修复智能体：给定一个 Java 项目和一个 Bug 描述，
 它自己搜索代码、定位问题、修改源码、执行测试，并根据测试反馈反复修正，最终输出一个 Git Patch。
 
@@ -35,6 +37,7 @@ AgentLoop ──────────► LlmClient（决定下一步动作）
 - 端到端集成测试：现场生成一个带 Bug 的 Maven 项目，验证 Runner 能识别出失败的测试用例，
   并覆盖超时与路径不存在两条异常分支；另有一个端到端测试用假模型驱动循环，
   把同一个项目真正改到测试通过
+- GitHub Actions：push 到 main 与所有 PR 都会运行完整的 `mvn test`
 
 **进行中**
 
