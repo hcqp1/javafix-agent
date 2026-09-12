@@ -4,7 +4,10 @@ import com.javafix.agent.core.TestResult;
 import com.javafix.agent.core.TestRunner;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 /**
  * 把 {@link TestRunner} 包装成一个工具，让 Agent 能自己触发测试。
@@ -16,6 +19,17 @@ import java.util.Map;
  * 以及区分「编译失败」和「测试失败」——这两种情况的修复策略完全不同。
  */
 public class RunTestsTool extends ProjectTool {
+
+    /** 摘要里最多保留多少行。 */
+    private static final int MAX_LINES = 40;
+
+    /**
+     * 从完整日志里挑出对修复有用的行：测试汇总、构建结果、编译错误、断言信息、异常链。
+     * 其余大部分是插件下载与生命周期输出，对定位问题没有帮助。
+     */
+    private static final Pattern IMPORTANT = Pattern.compile(
+            "Tests run:|BUILD SUCCESS|BUILD FAILURE|\\[ERROR\\]|expected:|Caused by:|AssertionFailed|COMPILATION ERROR"
+    );
 
     private final TestRunner testRunner;
 
@@ -43,12 +57,41 @@ public class RunTestsTool extends ProjectTool {
 
         observation.append(result.isSuccess() ? "测试通过。" : "测试未通过。");
         observation.append("（退出码 ").append(result.getExitCode()).append("）\n");
-        observation.append(result.getStdout());
+        observation.append(summarize(result.getStdout()));
 
         if (result.getStderr() != null && !result.getStderr().isBlank()) {
             observation.append("\n").append(result.getStderr());
         }
 
         return observation.toString();
+    }
+
+    /**
+     * 把完整日志提炼成摘要。
+     *
+     * <p>之前这里是把整份 `mvn test` 输出原样交给模型。实测下来，一个只有 8 行的项目，
+     * 一次构建输出就有四十多行，大半是插件日志；真实项目的日志动辄几百上千行，
+     * 光这一项就能吃掉半个上下文窗口。完整日志仍然落在 target 下，需要时可以自己去看。
+     */
+    private String summarize(String log) {
+
+        List<String> kept = new ArrayList<>();
+
+        for (String line : log.lines().toList()) {
+            if (IMPORTANT.matcher(line).find()) {
+                kept.add(line.strip());
+                if (kept.size() >= MAX_LINES) {
+                    kept.add("（摘要已截断，完整日志见 target/javafix-mvn-test.log）");
+                    break;
+                }
+            }
+        }
+
+        if (kept.isEmpty()) {
+            // 摘要为空时不能说成"没有输出"，那会让模型误以为构建根本没跑
+            return "（日志里没有可提炼的关键行，完整日志见 target/javafix-mvn-test.log）";
+        }
+
+        return String.join("\n", kept);
     }
 }
