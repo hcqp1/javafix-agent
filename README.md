@@ -34,6 +34,9 @@ AgentLoop ──────────► LlmClient（决定下一步动作）
   而不是中断循环
 - `read_file` / `search_code` / `write_file` / `run_tests` / `shell` 五个工具：所有路径限制在仓库根目录内，
   搜索结果带命中上限，避免一次搜索撑爆上下文；`shell` 与测试执行器共用同一套进程处理逻辑
+- `OpenAiCompatibleLlmClient`：走 OpenAI 兼容协议的模型客户端（DeepSeek / 通义 / Kimi / Ollama 都可用），
+  带超时、退避重试；5xx 与 429 会重试，其他 4xx 直接失败并把服务端原因带出来
+- `Main`：命令行入口，模型配置从环境变量读取，不写进代码也不进仓库
 - 端到端集成测试：现场生成一个带 Bug 的 Maven 项目，验证 Runner 能识别出失败的测试用例，
   并覆盖超时与路径不存在两条异常分支；另有一个端到端测试用假模型驱动循环，
   把同一个项目真正改到测试通过
@@ -41,7 +44,7 @@ AgentLoop ──────────► LlmClient（决定下一步动作）
 
 **进行中**
 
-- LLM 接入：`LlmClient` 只有接口，还没有任何实现——这是下一步
+- 用真实模型跑通一次完整的 bug 修复（客户端已经实现并测过，但还没在真实模型上跑过）
 
 **计划中**
 
@@ -58,18 +61,33 @@ AgentLoop ──────────► LlmClient（决定下一步动作）
 ## 快速开始
 
 ```bash
-# 构建并运行测试
+# 构建并运行测试（不需要联网，也不需要 API Key）
 mvn test
 ```
 
-当前入口 `Main` 只打印一行启动信息——Agent 循环尚未接通，还不能真正修 bug。
+想让它真的修一个 bug，先配置模型（以 DeepSeek 为例）：
+
+```bash
+set JAVAFIX_LLM_BASE_URL=https://api.deepseek.com/v1
+set JAVAFIX_LLM_API_KEY=你的 key
+set JAVAFIX_LLM_MODEL=deepseek-chat
+```
+
+然后指定一个项目目录和 Bug 描述：
+
+```bash
+mvn -q exec:java -Dexec.args="D:\some-java-project Calculator.add(2,3) 返回 -1，期望是 5"
+```
+
+运行结束后会打印 Agent 的结论和完整的运行轨迹——轨迹是排查「它为什么这么改」的唯一线索。
 
 ## 设计取舍
 
 - **不引入 Spring AI / LangChain4j 等 Agent 框架**，循环自己写。本项目要验证的正是循环本身的设计
   （上下文选择、工具调度、测试反馈如何影响下一轮决策），套框架会把这个核心问题藏起来。
 - **先只支持 Maven**。Gradle 等到 Maven 链路跑通、评测有数据之后再考虑。
-- **依赖保持最小**。V0 唯一的第三方依赖是测试用的 JUnit 5。
+- **生产依赖只有一个**：Jackson，用来处理模型接口的 JSON。HTTP 用 JDK 自带的 `HttpClient`。
+  请求体要正确转义、响应是嵌套结构，这两件事手写解析器不划算；但除此之外不再引任何东西。
 
 ## 项目愿景
 
