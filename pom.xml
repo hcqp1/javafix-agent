@@ -20,12 +20,24 @@
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
         <junit.jupiter.version>5.14.4</junit.jupiter.version>
+        <jackson.version>2.17.2</jackson.version>
         <maven.compiler.plugin.version>3.13.0</maven.compiler.plugin.version>
         <maven.surefire.plugin.version>3.5.4</maven.surefire.plugin.version>
+        <exec.plugin.version>3.1.0</exec.plugin.version>
     </properties>
 
     <dependencies>
-        <!-- V0 阶段唯一的依赖：测试用 JUnit 5。刻意不引入 Spring / 数据库 / Web 框架等。 -->
+        <!--
+            唯一的生产依赖。选它的理由：模型返回的是嵌套 JSON，且内容里会带引号、
+            换行和 unicode 转义，手写解析器属于自找麻烦。HTTP 本身用 JDK 自带的
+            HttpClient，不再引额外的 HTTP 库。
+        -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>${jackson.version}</version>
+        </dependency>
+
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
@@ -45,6 +57,16 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>${maven.surefire.plugin.version}</version>
+            </plugin>
+
+            <!-- 让 `mvn exec:java -Dexec.args="..."` 可以直接跑起来，不必手工拼 classpath -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>${exec.plugin.version}</version>
+                <configuration>
+                    <mainClass>com.javafix.agent.Main</mainClass>
+                </configuration>
             </plugin>
         </plugins>
     </build>
