@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Show toolchain
+        run: |
+          java -version
+          mvn -v
+
+      # 本地怎么验证，CI 就怎么验证：测试里有真实启动 Maven 的集成测试，
+      # 不为了跑得快而在 CI 里换一套简化版的测试。
+      - name: Run tests
+        run: mvn -B --no-transfer-progress test
