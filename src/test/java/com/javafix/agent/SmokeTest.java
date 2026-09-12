@@ -35,7 +35,7 @@ class SmokeTest {
                 new ReadFileTool(root),
                 new SearchCodeTool(root),
                 new WriteFileTool(root),
-                new ShellTool()
+                new ShellTool(root)
         );
 
         Set<String> names = new HashSet<>();
