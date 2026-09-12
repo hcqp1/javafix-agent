@@ -6,8 +6,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 
@@ -25,14 +23,14 @@ class MavenTestRunnerTest {
     @Test
     void shouldDetectFailedMavenTest() throws IOException {
 
-        Path project = newBuggyCalculatorProject();
+        Path project = BuggyCalculatorProject.create(tempDir);
 
         TestResult result = new MavenTestRunner().run(project);
 
         assertFalse(result.isSuccess(), "失败的测试不能被报告成成功");
         assertEquals(1, result.getExitCode(), "Maven 构建失败时的退出码是 1");
 
-        // 这里刻意断言到「哪个测试失败了」，而不是只断言“Maven 失败了”：
+        // 刻意断言到「哪个测试失败了」，而不是只断言“Maven 失败了”：
         // 依赖下载失败、pom 写错同样会给出 BUILD FAILURE，但那不是本测试要证明的东西
         assertTrue(
                 result.getStdout().contains("Tests run: 1, Failures: 1"),
@@ -48,7 +46,7 @@ class MavenTestRunnerTest {
     @Test
     void shouldGiveUpWhenMavenTakesTooLong() throws IOException {
 
-        Path project = newBuggyCalculatorProject();
+        Path project = BuggyCalculatorProject.create(tempDir);
 
         // 400ms 远小于任何一次真实的 mvn test，必然走到超时分支
         MavenTestRunner runner = new MavenTestRunner(Duration.ofMillis(400));
@@ -74,112 +72,5 @@ class MavenTestRunnerTest {
                 result.getStderr().contains("not a directory"),
                 "路径不存在要直接说清楚，实际：" + result.getStderr()
         );
-    }
-
-    /**
-     * 生成一个真实但故意写错的 Maven 项目，返回它的根目录。
-     *
-     * <p>这个「带 Bug 的 Calculator」同时也是后续 Agent 修 bug 演示与评测的靶子。
-     */
-    private Path newBuggyCalculatorProject() throws IOException {
-
-        Path mainJava = tempDir.resolve(
-                "src/main/java/com/example"
-        );
-
-        Path testJava = tempDir.resolve(
-                "src/test/java/com/example"
-        );
-
-        Files.createDirectories(mainJava);
-        Files.createDirectories(testJava);
-
-        String pom = String.join("\n",
-                "<project xmlns=\"http://maven.apache.org/POM/4.0.0\"",
-                "         xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"",
-                "         xsi:schemaLocation=\"http://maven.apache.org/POM/4.0.0",
-                "         https://maven.apache.org/xsd/maven-4.0.0.xsd\">",
-                "",
-                "    <modelVersion>4.0.0</modelVersion>",
-                "",
-                "    <groupId>com.example</groupId>",
-                "    <artifactId>buggy-calculator</artifactId>",
-                "    <version>1.0-SNAPSHOT</version>",
-                "",
-                "    <properties>",
-                "        <maven.compiler.source>17</maven.compiler.source>",
-                "        <maven.compiler.target>17</maven.compiler.target>",
-                "        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>",
-                "    </properties>",
-                "",
-                "    <dependencies>",
-                "        <dependency>",
-                "            <groupId>org.junit.jupiter</groupId>",
-                "            <artifactId>junit-jupiter</artifactId>",
-                "            <version>5.10.2</version>",
-                "            <scope>test</scope>",
-                "        </dependency>",
-                "    </dependencies>",
-                "",
-                "    <build>",
-                "        <plugins>",
-                "            <plugin>",
-                "                <groupId>org.apache.maven.plugins</groupId>",
-                "                <artifactId>maven-surefire-plugin</artifactId>",
-                "                <version>3.2.5</version>",
-                "            </plugin>",
-                "        </plugins>",
-                "    </build>",
-                "",
-                "</project>"
-        );
-
-        Files.write(
-                tempDir.resolve("pom.xml"),
-                pom.getBytes(StandardCharsets.UTF_8)
-        );
-
-        // 故意写错的 Calculator：add 应该是 a + b
-        String calculator = String.join("\n",
-                "package com.example;",
-                "",
-                "public class Calculator {",
-                "",
-                "    public int add(int a, int b) {",
-                "        return a - b;",
-                "    }",
-                "}"
-        );
-
-        Files.write(
-                mainJava.resolve("Calculator.java"),
-                calculator.getBytes(StandardCharsets.UTF_8)
-        );
-
-        // 正确的测试：期望 2 + 3 = 5
-        String calculatorTest = String.join("\n",
-                "package com.example;",
-                "",
-                "import org.junit.jupiter.api.Test;",
-                "",
-                "import static org.junit.jupiter.api.Assertions.assertEquals;",
-                "",
-                "class CalculatorTest {",
-                "",
-                "    @Test",
-                "    void shouldAddTwoNumbers() {",
-                "        Calculator calculator = new Calculator();",
-                "",
-                "        assertEquals(5, calculator.add(2, 3));",
-                "    }",
-                "}"
-        );
-
-        Files.write(
-                testJava.resolve("CalculatorTest.java"),
-                calculatorTest.getBytes(StandardCharsets.UTF_8)
-        );
-
-        return tempDir;
     }
 }
