@@ -83,6 +83,10 @@ class AgentLoopTest {
             assertTrue(trace.contains("[" + phase + "]"), "轨迹里应该走过 " + phase + " 阶段，实际：\n" + trace);
         }
         assertTrue(trace.contains("BUILD SUCCESS"), "最终验证应该跑通，运行轨迹：\n" + trace);
+
+        // 轨迹里不能出现协议语法——模型会把它当模板照抄，前两次翻车都是这个原因
+        assertFalse(trace.contains("TOOL:"), "轨迹不该泄露协议形状：\n" + trace);
+        assertFalse(trace.contains("ARGS:"), "轨迹不该泄露协议形状：\n" + trace);
     }
 
     @Test

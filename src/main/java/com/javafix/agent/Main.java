@@ -11,8 +11,12 @@ import com.javafix.agent.tool.ShellTool;
 import com.javafix.agent.tool.Tool;
 import com.javafix.agent.tool.WriteFileTool;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.List;
 
@@ -90,9 +94,43 @@ public class Main {
             System.out.println("耗时：" + elapsedMillis + " ms");
             System.out.println("token：" + llmClient.usage());
 
-            // 无论成功失败都把轨迹打出来——Agent 出错时，轨迹是唯一的线索
-            System.out.println("\n=== 运行轨迹 ===");
-            loop.transcript().forEach(System.out::println);
+            // 终端只给摘要：完整轨迹动辄上千行，刷屏反而让人看不到重点
+            System.out.println("\n=== 各阶段一览 ===");
+            loop.transcript().forEach(entry -> System.out.println(summarize(entry)));
+
+            System.out.println("\n完整轨迹已写入：" + writeTranscript(loop.transcript()));
+        }
+    }
+
+    /** 把一条轨迹压成一行：阶段 + 这一步调用了什么。 */
+    private static String summarize(String entry) {
+
+        String[] lines = entry.split("\n");
+        String head = lines.length > 0 ? lines[0] : entry;
+
+        for (int i = 1; i < lines.length; i++) {
+            String line = lines[i];
+            if (line.startsWith("调用了工具：") || line.startsWith("阶段结论：")) {
+                return head + "  " + line;
+            }
+        }
+
+        return head;
+    }
+
+    /** 完整轨迹写进临时文件——Agent 出错时，它是唯一的线索，但没必要刷屏。 */
+    private static Path writeTranscript(List<String> transcript) {
+        try {
+            Path file = Path.of(
+                    System.getProperty("java.io.tmpdir"),
+                    "javafix-transcript-"
+                            + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"))
+                            + ".log"
+            );
+            Files.writeString(file, String.join("\n\n", transcript), StandardCharsets.UTF_8);
+            return file;
+        } catch (IOException e) {
+            return Path.of("（写入失败：" + e.getMessage() + "）");
         }
     }
 
