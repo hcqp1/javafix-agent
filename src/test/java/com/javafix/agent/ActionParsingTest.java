@@ -73,4 +73,48 @@ class ActionParsingTest {
 
         assertThrows(IllegalArgumentException.class, () -> Action.parse("我觉得这里有点问题\n"));
     }
+
+    @Test
+    void shouldAcceptFullWidthColons() {
+
+        Action action = Action.parse("""
+                THOUGHT：搜索结果太宽泛，需要收窄
+                TOOL：search_code
+                QUERY：TimerMessageStore
+                """);
+
+        assertEquals("search_code", action.toolName());
+        assertEquals("TimerMessageStore", action.arguments().get("query"));
+        assertTrue(action.thought().contains("搜索结果太宽泛"));
+    }
+
+    @Test
+    void shouldAcceptLowercaseArgumentNames() {
+
+        Action action = Action.parse("TOOL: search_code\nquery: timer\nregex: true\n");
+
+        assertEquals("timer", action.arguments().get("query"));
+        assertEquals("true", action.arguments().get("regex"));
+    }
+
+    @Test
+    void shouldUseOnlyTheFirstActionBlockWhenModelEmitsSeveral() {
+
+        Action action = Action.parse("""
+                THOUGHT：先收窄搜索范围
+                TOOL：search_code
+                QUERY：TimerMessageStore
+
+                THOUGHT：再看目录结构
+                TOOL：shell
+                COMMAND：dir /s /b broker
+                """);
+
+        assertEquals("search_code", action.toolName());
+        assertEquals("TimerMessageStore", action.arguments().get("query"));
+        assertFalse(
+                action.arguments().containsKey("command"),
+                "第二个动作块不该混进第一个的参数里：" + action.arguments()
+        );
+    }
 }

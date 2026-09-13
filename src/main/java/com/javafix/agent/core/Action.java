@@ -26,9 +26,20 @@ import java.util.regex.Pattern;
  */
 public class Action {
 
-    /** 形如 {@code PATH: xxx} 的参数行；参数名必须全大写。 */
+    /** 动作关键字行。模型有时写成中文全角冒号，两种都认。 */
+    private static final Pattern ACTION_LINE = Pattern.compile(
+            "^\\s*(THOUGHT|TOOL|FINAL)\\s*[:：]\\s*(.*)$",
+            Pattern.CASE_INSENSITIVE
+    );
+
+    /**
+     * 参数行，例如 {@code PATH: xxx}。
+     *
+     * <p>参数名要求顶格写：放宽到任意缩进位置，会让文件内容里形如 {@code key: value} 的行
+     * （YAML、properties 配置）被误当成参数——那比"少解析一个参数"严重得多。
+     */
     private static final Pattern ARGUMENT_LINE =
-            Pattern.compile("^\\s*([A-Z][A-Z_]*):[ \\t]?(.*)$");
+            Pattern.compile("^([A-Za-z][A-Za-z_0-9]*)[ \\t]*[:：][ \\t]?(.*)$");
 
     private final String thought;
     private final String toolName;
@@ -75,27 +86,29 @@ public class Action {
 
         for (int i = 0; i < lines.size(); i++) {
 
-            String line = lines.get(i).strip();
-
-            if (line.startsWith("THOUGHT:")) {
-                thought = line.substring("THOUGHT:".length()).strip();
+            Matcher matcher = ACTION_LINE.matcher(lines.get(i));
+            if (!matcher.matches()) {
                 continue;
             }
 
-            if (line.startsWith("FINAL:")) {
-                String inline = line.substring("FINAL:".length()).strip();
+            String keyword = matcher.group(1).toUpperCase(Locale.ROOT);
+            String inline = matcher.group(2).strip();
+
+            if ("THOUGHT".equals(keyword)) {
+                thought = inline;
+                continue;
+            }
+
+            if ("FINAL".equals(keyword)) {
                 String rest = String.join("\n", lines.subList(i + 1, lines.size())).strip();
                 String answer = rest.isEmpty() ? inline : inline.isEmpty() ? rest : inline + "\n" + rest;
                 return new Action(thought, null, Map.of(), answer);
             }
 
-            if (line.startsWith("TOOL:")) {
-                String name = line.substring("TOOL:".length()).strip();
-                if (name.isEmpty()) {
-                    throw new IllegalArgumentException("TOOL 行没有写工具名");
-                }
-                return new Action(thought, name, parseArguments(lines.subList(i + 1, lines.size())), null);
+            if (inline.isEmpty()) {
+                throw new IllegalArgumentException("TOOL 行没有写工具名");
             }
+            return new Action(thought, inline, parseArguments(lines.subList(i + 1, lines.size())), null);
         }
 
         throw new IllegalArgumentException("回复里既没有 TOOL: 也没有 FINAL: 行");
@@ -129,6 +142,12 @@ public class Action {
         List<String> currentValue = new ArrayList<>();
 
         for (String line : lines) {
+
+            // 模型有时一条回复里塞好几个动作块；当前动作的参数到下一个动作行为止，
+            // 否则第一块的参数会把后面几块的内容全吞进去。
+            if (ACTION_LINE.matcher(line).matches()) {
+                break;
+            }
 
             Matcher matcher = ARGUMENT_LINE.matcher(line);
 
