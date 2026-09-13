@@ -50,7 +50,7 @@ public class MavenTestRunner implements TestRunner {
 
         try {
             ProcessRunner.Result result =
-                    ProcessRunner.run(mavenCommand(), projectPath, log, timeout);
+                    ProcessRunner.run(mavenCommand(projectPath), projectPath, log, timeout);
 
             if (result.timedOut()) {
                 return new TestResult(
@@ -81,12 +81,23 @@ public class MavenTestRunner implements TestRunner {
     }
 
     /**
-     * Windows 上 {@code mvn.cmd} 是批处理脚本，必须借 cmd 执行；
-     * 其他平台直接调用 {@code mvn} 即可。
+     * 决定用哪条命令跑测试。
+     *
+     * <p><b>项目自带 Maven Wrapper 时优先用它。</b>真实仓库经常在 pom 里限定 Maven 版本
+     * （例如要求 ≥ 3.9.16），拿系统那套 mvn 去跑会因为工具链版本不符而失败——
+     * 那种失败和被测的 Bug 毫无关系，却很容易被当成"测试失败"记进评测结果。
+     * Wrapper 会把项目要求的那个 Maven 版本拉下来，从根上避免这类误判。
+     *
+     * <p>Windows 上批处理脚本必须借 cmd 执行，其他平台直接调用即可。
      */
-    private static List<String> mavenCommand() {
-        return ProcessRunner.isWindows()
-                ? List.of("cmd.exe", "/c", "mvn.cmd", "test")
-                : List.of("mvn", "test");
+    static List<String> mavenCommand(Path projectPath) {
+
+        if (ProcessRunner.isWindows()) {
+            String script = Files.isRegularFile(projectPath.resolve("mvnw.cmd")) ? "mvnw.cmd" : "mvn.cmd";
+            return List.of("cmd.exe", "/c", script, "test");
+        }
+
+        String script = Files.isRegularFile(projectPath.resolve("mvnw")) ? "./mvnw" : "mvn";
+        return List.of(script, "test");
     }
 }
