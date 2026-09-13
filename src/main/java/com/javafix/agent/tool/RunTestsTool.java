@@ -45,13 +45,15 @@ public class RunTestsTool extends ProjectTool {
 
     @Override
     public String description() {
-        return "在仓库根目录执行 mvn test，返回构建与测试的输出。参数：无。";
+        return "在仓库根目录执行 mvn test，返回构建与测试的输出。"
+                + "参数：test（可选，只跑指定的测试类，例如 FooTest；真实仓库务必用它把范围收窄，"
+                + "否则一次全量测试可能几十分钟）。";
     }
 
     @Override
     public String execute(Map<String, String> arguments) {
 
-        TestResult result = testRunner.run(root);
+        TestResult result = testRunner.run(root, arguments.get("test"));
 
         StringBuilder observation = new StringBuilder();
 
