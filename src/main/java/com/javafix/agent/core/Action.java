@@ -103,6 +103,27 @@ public class Action {
 
     private static Map<String, String> parseArguments(List<String> lines) {
 
+        Map<String, String> arguments = parseLines(lines);
+
+        // 容错：模型有时把整个参数表塞进一个叫 args 的值里，还可能嵌套一层。
+        // 这些形状都来自真实运行，不是假想出来的。
+        for (int depth = 0; depth < 2; depth++) {
+            String nested = arguments.remove("args");
+            if (nested == null) {
+                break;
+            }
+            Map<String, String> inner = parseLines(nested.lines().toList());
+            if (inner.isEmpty()) {
+                inner = parseInline(nested);
+            }
+            inner.forEach(arguments::putIfAbsent);
+        }
+
+        return arguments;
+    }
+
+    private static Map<String, String> parseLines(List<String> lines) {
+
         Map<String, String> arguments = new LinkedHashMap<>();
         String currentKey = null;
         List<String> currentValue = new ArrayList<>();
@@ -118,7 +139,20 @@ public class Action {
                 currentKey = matcher.group(1).toLowerCase(Locale.ROOT);
                 currentValue = new ArrayList<>();
                 currentValue.add(matcher.group(2));
-            } else if (currentKey != null) {
+                continue;
+            }
+
+            // 正常规则认不出来时才走容错：模型可能把参数写成一行键值对，
+            // 例如 {query=Foo, regex=false}
+            if (currentKey == null) {
+                Map<String, String> inline = parseInline(line);
+                if (!inline.isEmpty()) {
+                    arguments.putAll(inline);
+                    continue;
+                }
+            }
+
+            if (currentKey != null) {
                 currentValue.add(line);
             }
         }
@@ -128,5 +162,56 @@ public class Action {
         }
 
         return arguments;
+    }
+
+    /**
+     * 解析一行「外层带花括号的键值对」，例如 {@code {query=Foo, regex=false}}
+     * 或 {@code {PATH: a/b.java}}。
+     *
+     * <p>这是给模型的容错兜底，不是通用语法解析：只认「外层花括号 + 逗号分隔」这一种形状，
+     * 认不出来就返回空，交回正常规则处理。容错的目的是别让一步白白浪费掉，
+     * 不是"什么都能收"——真出现更多变体，该做的是换协议，而不是继续加规则。
+     */
+    private static Map<String, String> parseInline(String line) {
+
+        String body = line == null ? "" : line.strip();
+
+        // 没有花括号的普通行交给正常规则，避免误伤多行内容
+        if (!body.startsWith("{") && !body.endsWith("}")) {
+            return Map.of();
+        }
+
+        if (body.startsWith("{")) {
+            body = body.substring(1);
+        }
+        if (body.endsWith("}")) {
+            body = body.substring(0, body.length() - 1);
+        }
+
+        Map<String, String> parsed = new LinkedHashMap<>();
+
+        for (String pair : body.split(",")) {
+
+            int separator = pair.indexOf('=');
+            if (separator < 0) {
+                separator = pair.indexOf(':');
+            }
+            if (separator <= 0) {
+                continue;
+            }
+
+            String key = pair.substring(0, separator).strip().toLowerCase(Locale.ROOT);
+            String value = pair.substring(separator + 1).strip();
+
+            if (value.endsWith("}")) {
+                value = value.substring(0, value.length() - 1).strip();
+            }
+
+            if (!key.isEmpty()) {
+                parsed.put(key, value);
+            }
+        }
+
+        return parsed;
     }
 }

@@ -18,6 +18,15 @@ public class AgentLoop {
 
     private static final int DEFAULT_MAX_STEPS = 16;
 
+    /**
+     * 单条观察结果回灌给模型时的长度上限。
+     *
+     * <p>一次 read_file 就可能带回几百行，而这些内容会被完整写进轨迹、
+     * 并在之后的每一步重新发一遍。实测一次真实运行 16 步累计了 36 万输入 token，
+     * 到后半程模型已经分不清哪些是当前任务、哪些是历史噪音了。
+     */
+    private static final int MAX_OBSERVATION_CHARS = 4000;
+
     /** 一条测试失败，用于判定"复现"阶段完成。 */
     private static final Pattern FAILING_TEST =
             Pattern.compile("Tests run:.*(Failures: [1-9]|Errors: [1-9])");
@@ -90,7 +99,7 @@ public class AgentLoop {
             }
 
             if (action.isFinal()) {
-                record(phase, step, "FINAL: " + action.finalAnswer(), "");
+                record(phase, step, "阶段结论：" + action.finalAnswer(), "");
                 lastSummary = action.finalAnswer();
                 if (phase == Phase.VERIFY) {
                     return lastSummary;
@@ -195,10 +204,20 @@ public class AgentLoop {
         }
     }
 
+    /**
+     * 把一步动作渲染给模型看。
+     *
+     * <p>刻意不按协议的样子写（不出现 TOOL、参数名这类形状）：模型会把提示词和轨迹里
+     * "看起来能直接照抄的形状"当成模板模仿，之前两次翻车都是这么来的。
+     * 协议只在 {@code ACTION_FORMAT} 那一处说明，轨迹这里用自然语言描述。
+     */
     private String describe(Action action) {
-        return "THOUGHT: " + action.thought()
-                + "\nTOOL: " + action.toolName()
-                + "\nARGS: " + action.arguments();
+        String parameterNames = action.arguments().isEmpty()
+                ? "无"
+                : String.join("、", action.arguments().keySet());
+        return "思路：" + action.thought()
+                + "\n调用了工具：" + action.toolName()
+                + "\n参数：" + parameterNames;
     }
 
     private String toolNames() {
@@ -206,6 +225,20 @@ public class AgentLoop {
     }
 
     private void record(Phase phase, int step, String action, String observation) {
-        transcript.add("[" + phase.label() + "] 步骤 " + step + "\n" + action + "\n观察：" + observation);
+        transcript.add("[" + phase.label() + "] 步骤 " + step
+                + "\n" + action
+                + "\n观察：" + trim(observation));
+    }
+
+    /** 观察结果超长就截断，并明确告诉模型"这里被截断了，完整内容要重新读"。 */
+    private static String trim(String observation) {
+
+        if (observation == null || observation.length() <= MAX_OBSERVATION_CHARS) {
+            return observation;
+        }
+
+        return observation.substring(0, MAX_OBSERVATION_CHARS)
+                + "\n（内容过长已截断，原文共 " + observation.length()
+                + " 字符；需要完整内容请重新读取相关部分）";
     }
 }
