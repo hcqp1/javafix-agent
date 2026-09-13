@@ -18,8 +18,15 @@ import java.util.List;
  */
 public class MavenTestRunner implements TestRunner {
 
-    /** 单次 {@code mvn test} 默认允许占用的最长时间。 */
-    private static final Duration DEFAULT_TIMEOUT = Duration.ofMinutes(5);
+    /**
+     * 单次 {@code mvn test} 默认允许占用的最长时间。
+     *
+     * <p>15 分钟这个值是拿真实仓库换来的：在一份普通规模的真实项目上做一次全量构建要六到十几分钟
+     * （首次还要下载依赖、编译上千个测试类）。原来 5 分钟的默认值会让真实仓库样本几乎必然
+     * 被误判成超时——**那种失败和被测的 Bug 毫无关系，却会污染整份评测结果**，
+     * 正是我们最不想要的假失败。小项目可以自己传更短的超时。
+     */
+    private static final Duration DEFAULT_TIMEOUT = Duration.ofMinutes(15);
 
     /** 日志相对目标项目根目录的位置，超时或失败之后仍可回看。 */
     private static final String LOG_FILE = "target/javafix-mvn-test.log";
