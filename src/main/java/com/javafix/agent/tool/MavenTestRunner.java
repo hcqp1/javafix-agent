@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -44,6 +45,11 @@ public class MavenTestRunner implements TestRunner {
 
     @Override
     public TestResult run(Path projectPath) {
+        return run(projectPath, null);
+    }
+
+    @Override
+    public TestResult run(Path projectPath, String testSelector) {
 
         if (!Files.isDirectory(projectPath)) {
             return new TestResult(
@@ -57,7 +63,7 @@ public class MavenTestRunner implements TestRunner {
 
         try {
             ProcessRunner.Result result =
-                    ProcessRunner.run(mavenCommand(projectPath), projectPath, log, timeout);
+                    ProcessRunner.run(mavenCommand(projectPath, testSelector), projectPath, log, timeout);
 
             if (result.timedOut()) {
                 return new TestResult(
@@ -98,13 +104,33 @@ public class MavenTestRunner implements TestRunner {
      * <p>Windows 上批处理脚本必须借 cmd 执行，其他平台直接调用即可。
      */
     static List<String> mavenCommand(Path projectPath) {
+        return mavenCommand(projectPath, null);
+    }
+
+    /**
+     * 同上，但可以只跑一个测试类。
+     *
+     * <p>把 -Dtest 交给 Agent 自己指定，而不是写死在工具里：它才知道自己正在验证什么。
+     */
+    static List<String> mavenCommand(Path projectPath, String testSelector) {
+
+        List<String> command = new ArrayList<>();
 
         if (ProcessRunner.isWindows()) {
+            command.add("cmd.exe");
+            command.add("/c");
             String script = Files.isRegularFile(projectPath.resolve("mvnw.cmd")) ? "mvnw.cmd" : "mvn.cmd";
-            return List.of("cmd.exe", "/c", script, "test");
+            command.add(script);
+        } else {
+            command.add(Files.isRegularFile(projectPath.resolve("mvnw")) ? "./mvnw" : "mvn");
         }
 
-        String script = Files.isRegularFile(projectPath.resolve("mvnw")) ? "./mvnw" : "mvn";
-        return List.of(script, "test");
+        if (testSelector != null && !testSelector.isBlank()) {
+            command.add("-Dtest=" + testSelector);
+            command.add("-DfailIfNoTests=false");
+        }
+
+        command.add("test");
+        return command;
     }
 }

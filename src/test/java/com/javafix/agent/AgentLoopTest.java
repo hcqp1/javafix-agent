@@ -19,10 +19,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * 端到端测试：用预先写好动作序列的假模型，驱动整条管道把一个真实的 Bug 修掉。
- *
- * <p>不依赖网络和真模型，但跑的是真的 Maven 构建——它验证的是
- * 「循环 → 工具 → 测试反馈」这条链路真的能跑通，而不是各个部件单独看起来都没问题。
+ * 端到端测试：用预先写好动作序列的假模型驱动四阶段工作流。
  */
 class AgentLoopTest {
 
@@ -30,19 +27,19 @@ class AgentLoopTest {
     Path project;
 
     @Test
-    void shouldFixBuggyCalculatorEndToEnd() throws IOException {
+    void shouldRunThroughAllPhasesAndFixTheBug() throws IOException {
 
         BuggyCalculatorProject.create(project);
 
-        // 一个真实 Agent 大概会走的四步：先看代码、改、验证、汇报
         ScriptedLlmClient llm = new ScriptedLlmClient(
+                // 复现：直接跑测试，发现已有一条失败测试，代码据此进入定位
+                "TOOL: run_tests\n",
+                // 定位：读源码
+                "TOOL: read_file\nPATH: src/main/java/com/example/Calculator.java\n",
+                // 定位完成，进入修复
+                "FINAL: 缺陷在 Calculator.add，把加法写成了减法\n",
+                // 修复：改写源码
                 """
-                THOUGHT: 先看看 Calculator 的实现
-                TOOL: read_file
-                PATH: src/main/java/com/example/Calculator.java
-                """,
-                """
-                THOUGHT: add 被写成了减法，应该是加法
                 TOOL: write_file
                 PATH: src/main/java/com/example/Calculator.java
                 CONTENT:
@@ -55,14 +52,10 @@ class AgentLoopTest {
                     }
                 }
                 """,
-                """
-                THOUGHT: 跑一遍测试确认修好了
-                TOOL: run_tests
-                """,
-                """
-                THOUGHT: 测试通过了，可以收工
-                FINAL: 把 Calculator.add 里的减法改成了加法，测试已经变绿。
-                """
+                // 修复完成，进入验证
+                "FINAL: 把 Calculator.add 的减法改成了加法\n",
+                // 验证：再跑一次，通过后结束
+                "TOOL: run_tests\n"
         );
 
         List<Tool> tools = List.of(
@@ -74,11 +67,10 @@ class AgentLoopTest {
 
         AgentLoop loop = new AgentLoop(llm, tools, 8);
 
-        String answer = loop.run("Calculator.add(2, 3) 返回 -1，但期望是 5。请修复。");
+        String answer = loop.run("Calculator.add(2, 3) 返回 -1，但期望是 5");
 
         assertTrue(answer.contains("加法"), "最终答复应该说明改了什么，实际：" + answer);
-
-        assertEquals(4, llm.prompts().size(), "四步脚本应该正好用掉四次模型调用");
+        assertEquals(6, llm.prompts().size(), "六步脚本应该正好用掉六次模型调用");
 
         String source = Files.readString(
                 project.resolve("src/main/java/com/example/Calculator.java"),
@@ -86,40 +78,38 @@ class AgentLoopTest {
         );
         assertTrue(source.contains("return a + b;"), "文件应该真的被改了，实际内容：\n" + source);
 
-        // 最强的一条断言：循环里真的跑了 mvn test，而且这次构建是成功的
         String trace = String.join("\n", loop.transcript());
-        assertTrue(trace.contains("BUILD SUCCESS"), "修复之后测试应该跑通，运行轨迹：\n" + trace);
+        for (String phase : List.of("复现", "定位", "修复", "验证")) {
+            assertTrue(trace.contains("[" + phase + "]"), "轨迹里应该走过 " + phase + " 阶段，实际：\n" + trace);
+        }
+        assertTrue(trace.contains("BUILD SUCCESS"), "最终验证应该跑通，运行轨迹：\n" + trace);
     }
 
     @Test
-    void shouldFeedToolErrorsBackToTheModelInsteadOfFailing() {
+    void shouldRefuseToWriteMainSourceDuringReproduce() throws IOException {
+
+        BuggyCalculatorProject.create(project);
 
         ScriptedLlmClient llm = new ScriptedLlmClient(
-                """
-                THOUGHT: 试试一个不存在的工具
-                TOOL: no_such_tool
-                """,
-                """
-                THOUGHT: 换个真实存在的工具
-                TOOL: search_code
-                QUERY: nothing-here
-                """,
-                """
-                THOUGHT: 确认仓库里没有这个内容，收工
-                FINAL: 没有找到相关内容。
-                """
+                "TOOL: write_file\nPATH: src/main/java/com/example/Calculator.java\nCONTENT:\npackage com.example; public class Calculator {}\n"
         );
 
-        AgentLoop loop = new AgentLoop(llm, List.of(new SearchCodeTool(project)), 5);
+        AgentLoop loop = new AgentLoop(
+                llm,
+                List.of(new WriteFileTool(project), new RunTestsTool(new MavenTestRunner(), project)),
+                3
+        );
 
-        String answer = loop.run("看看仓库里有没有 nothing-here");
-
-        assertEquals("没有找到相关内容。", answer);
+        // 脚本只有一条，下一步会因脚本耗尽而抛异常；这里只关心那条写操作被拦住
+        assertThrows(RuntimeException.class, () -> loop.run("随便一个现象"));
 
         String trace = String.join("\n", loop.transcript());
-        assertTrue(
-                trace.contains("没有名为 no_such_tool 的工具"),
-                "未知工具要作为观察结果回灌给模型，实际：\n" + trace
+        assertTrue(trace.contains("禁止修改 src/main"), "复现阶段的生产代码写操作要被拦截，实际：\n" + trace);
+
+        String source = Files.readString(
+                project.resolve("src/main/java/com/example/Calculator.java"),
+                StandardCharsets.UTF_8
         );
+        assertTrue(source.contains("return a - b;"), "生产代码不该被修改，实际内容：\n" + source);
     }
 }
