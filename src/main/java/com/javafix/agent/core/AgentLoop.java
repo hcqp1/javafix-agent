@@ -37,6 +37,9 @@ public class AgentLoop {
     /** 复现阶段连续这么多步还没有产出，就开始催。 */
     private static final int STALL_THRESHOLD = 3;
 
+    /** 验证失败最多退回修复几轮，防止"改—验—再改"无限循环。 */
+    private static final int MAX_FIX_ROUNDS = 3;
+
     /** 一条测试失败，用于判定"复现"阶段完成。 */
     private static final Pattern FAILING_TEST =
             Pattern.compile("Tests run:.*(Failures: [1-9]|Errors: [1-9])");
@@ -113,13 +116,17 @@ public class AgentLoop {
         String lastSummary = null;
         int phaseSteps = 0;
         int unproductiveSteps = 0;
+        boolean sourceChanged = false;
+        boolean sawPassingTest = false;
+        int fixRounds = 1;
 
         for (int step = 1; step <= maxSteps; step++) {
 
             emit("[" + phase.label() + " " + (phaseSteps + 1) + "/" + phase.stepBudget() + "] 思考中…");
 
             String response = llmClient.complete(
-                    buildPrompt(symptom, phase, lastSummary, step, phaseSteps, buildNudge(phase, phaseSteps, unproductiveSteps))
+                    buildPrompt(symptom, phase, lastSummary, step, phaseSteps,
+                            buildNudge(phase, phaseSteps, unproductiveSteps, sawPassingTest, sourceChanged))
             );
 
             Action action;
@@ -138,8 +145,29 @@ public class AgentLoop {
                 lastSummary = action.finalAnswer();
 
                 if (phase == Phase.VERIFY) {
+                    // 验证阶段发现"什么都没改"，说明修复阶段是空转的，退回重做
+                    if (!sourceChanged && fixRounds < MAX_FIX_ROUNDS) {
+                        fixRounds++;
+                        emit("没有任何代码改动，退回修复阶段（第 " + fixRounds + " 轮）");
+                        record(phase, step, "（验证退回）",
+                                "仓库里没有任何代码改动，说明修复阶段没有产出，退回修复阶段重做。");
+                        phase = Phase.FIX;
+                        phaseSteps = 0;
+                        unproductiveSteps = 0;
+                        continue;
+                    }
                     emit("验证通过，任务完成");
                     return lastSummary;
+                }
+
+                // 修复阶段不许空手离开：阶段出口由代码判定，不交给模型自觉
+                if (phase == Phase.FIX && !sourceChanged && phaseSteps < phase.stepBudget()) {
+                    emit("修复阶段还没改任何文件，不许离开这一阶段");
+                    record(phase, step, "（修复阶段未产出）",
+                            "修复阶段到目前为止没有改动任何文件——只在代码里查找不算完成修复。"
+                                    + "下一步必须用 write_file 落地一个最小改动。");
+                    phaseSteps++;
+                    continue;
                 }
 
                 Phase next = phase.next();
@@ -177,10 +205,18 @@ public class AgentLoop {
             record(phase, step, describe(action), observation);
             phaseSteps++;
 
+            boolean wroteFile = "write_file".equals(action.toolName()) && observation.startsWith("已写入 ");
+            boolean ranTests = "run_tests".equals(action.toolName());
+
+            if (wroteFile) {
+                sourceChanged = true;
+            }
+            if (ranTests && PASSING_TEST.matcher(observation).find()) {
+                sawPassingTest = true;
+            }
+
             // "产出"指的是写文件或跑测试；只是搜索、读文件不算——那样可以永远探索下去
-            boolean produced = "write_file".equals(action.toolName())
-                    || "run_tests".equals(action.toolName());
-            unproductiveSteps = produced ? 0 : unproductiveSteps + 1;
+            unproductiveSteps = (wroteFile || ranTests) ? 0 : unproductiveSteps + 1;
 
             if (phase == Phase.REPRODUCE && FAILING_TEST.matcher(observation).find()) {
                 lastSummary = "已复现一条失败测试";
@@ -193,6 +229,17 @@ public class AgentLoop {
 
             if (phase == Phase.VERIFY && PASSING_TEST.matcher(observation).find()) {
                 return lastSummary == null ? "验证通过" : lastSummary;
+            }
+
+            // 验证阶段跑出失败：说明修得不彻底，退回修复阶段
+            if (phase == Phase.VERIFY && FAILING_TEST.matcher(observation).find() && fixRounds < MAX_FIX_ROUNDS) {
+                fixRounds++;
+                emit("验证不通过，退回修复阶段（第 " + fixRounds + " 轮）");
+                record(phase, step, "（验证退回）", "验证阶段跑出失败测试，退回修复阶段继续改。");
+                phase = Phase.FIX;
+                phaseSteps = 0;
+                unproductiveSteps = 0;
+                continue;
             }
 
             if (phaseSteps >= phase.stepBudget()) {
@@ -273,20 +320,37 @@ public class AgentLoop {
     }
 
     /** 该催的时候催一句：快用完预算了，或者连续好几步只探索没产出。 */
-    private static String buildNudge(Phase phase, int phaseSteps, int unproductiveSteps) {
+    private static String buildNudge(
+            Phase phase,
+            int phaseSteps,
+            int unproductiveSteps,
+            boolean sawPassingTest,
+            boolean sourceChanged) {
 
-        if (phase != Phase.REPRODUCE) {
+        if (phase == Phase.REPRODUCE) {
+
+            if (sawPassingTest && unproductiveSteps >= 1) {
+                return "现有测试全部通过，说明这个现象根本没有被测试覆盖——所以复现只能靠你自己写。"
+                        + "下一步必须写出一条能失败的测试（write_file 到 src/test 下）；"
+                        + "可以打开同一个测试目录下已有的测试，照着它的骨架来写。";
+            }
+
+            if (unproductiveSteps >= STALL_THRESHOLD) {
+                return "你已经连续 " + unproductiveSteps + " 步只做探索、没有产出。下一步必须二选一："
+                        + "写出复现测试（write_file 到 src/test 下），或者运行测试（run_tests）。";
+            }
+
+            if (phaseSteps >= phase.stepBudget() - 1) {
+                return "本阶段只剩最后一步：请在这一步内拿出能失败的复现测试，"
+                        + "否则将带着「未复现」进入下一阶段。";
+            }
+
             return null;
         }
 
-        if (unproductiveSteps >= STALL_THRESHOLD) {
-            return "你已经连续 " + unproductiveSteps + " 步只做探索、没有产出。下一步必须二选一："
-                    + "写出复现测试（write_file 到 src/test 下），或者运行测试（run_tests）。";
-        }
-
-        if (phaseSteps >= phase.stepBudget() - 1) {
-            return "本阶段只剩最后一步：请在这一步内拿出能失败的复现测试，"
-                    + "否则将带着「未复现」进入下一阶段。";
+        if (phase == Phase.FIX && !sourceChanged) {
+            return "修复阶段到现在还没有改动任何文件。下一步必须用 write_file 落地一个最小改动——"
+                    + "继续读代码、继续搜索都不算完成这个阶段。";
         }
 
         return null;
