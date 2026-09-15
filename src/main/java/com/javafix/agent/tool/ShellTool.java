@@ -52,6 +52,8 @@ public class ShellTool extends ProjectTool {
     @Override
     public String execute(Map<String, String> arguments) {
 
+        rejectUnknownArguments(arguments, "command");
+
         String command = arguments.get("command");
 
         if (command == null || command.isBlank()) {

@@ -33,6 +33,8 @@ public class WriteFileTool extends ProjectTool {
     @Override
     public String execute(Map<String, String> arguments) {
 
+        rejectUnknownArguments(arguments, "path", "content");
+
         Path file = resolve(arguments.get("path"));
         String content = arguments.get("content");
 
