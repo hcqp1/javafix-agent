@@ -142,24 +142,122 @@ class AgentLoopTest {
 
         ScriptedLlmClient llm = new ScriptedLlmClient(
                 "TOOL: run_tests\n",
-                "FINAL: 已复现\n",
-                "FINAL: 定位在 Calculator.add\n",
-                "FINAL: 改好了\n",
+                "FINAL: 缺陷在 Calculator.add\n",
+                """
+                TOOL: write_file
+                PATH: src/main/java/com/example/Calculator.java
+                CONTENT:
+                package com.example;
+
+                public class Calculator {
+
+                    public int add(int a, int b) {
+                        return a + b;
+                    }
+                }
+                """,
+                "FINAL: 把减法改成了加法\n",
                 "TOOL: run_tests\n"
         );
 
         List<String> events = new java.util.ArrayList<>();
 
-        AgentLoop loop = new AgentLoop(llm, List.of(new RunTestsTool(new MavenTestRunner(), project)), 8)
-                .onProgress(events::add);
+        AgentLoop loop = new AgentLoop(
+                llm,
+                List.of(new WriteFileTool(project), new RunTestsTool(new MavenTestRunner(), project)),
+                8
+        ).onProgress(events::add);
 
         String answer = loop.run("Calculator.add(2, 3) 返回 -1，但期望是 5");
 
-        assertTrue(answer.contains("加法") || answer.contains("改好了"), answer);
+        assertTrue(answer.contains("加法"), answer);
 
         String log = String.join("\n", events);
         assertTrue(log.contains("思考中"), "要有正在思考的进度提示：" + log);
         assertTrue(log.contains("→ run_tests"), "执行工具前要报一声：" + log);
         assertTrue(log.contains("阶段推进"), "阶段切换要有提示：" + log);
+    }
+
+    @Test
+    void shouldNotLeaveTheFixPhaseWithoutChangingAnyFile() throws IOException {
+
+        BuggyCalculatorProject.create(project);
+
+        ScriptedLlmClient llm = new ScriptedLlmClient(
+                // 复现：跑测试发现已有一条失败 -> 自动进入定位
+                "TOOL: run_tests\n",
+                // 定位
+                "FINAL: 缺陷在 Calculator.add\n",
+                // 修复：只说改好了，但一行代码都没动——这一步应该被拦下
+                "FINAL: 我觉得已经改好了\n",
+                // 老老实实改
+                """
+                TOOL: write_file
+                PATH: src/main/java/com/example/Calculator.java
+                CONTENT:
+                package com.example;
+
+                public class Calculator {
+
+                    public int add(int a, int b) {
+                        return a + b;
+                    }
+                }
+                """,
+                "FINAL: 把减法改成了加法\n",
+                // 验证
+                "TOOL: run_tests\n"
+        );
+
+        AgentLoop loop = new AgentLoop(
+                llm,
+                List.of(new WriteFileTool(project), new RunTestsTool(new MavenTestRunner(), project)),
+                8
+        );
+
+        String answer = loop.run("Calculator.add(2, 3) 返回 -1，但期望是 5");
+
+        String trace = String.join("\n", loop.transcript());
+        assertTrue(trace.contains("修复阶段未产出"), "没改文件就宣称改好了，应该被拦下：\n" + trace);
+        assertEquals("把减法改成了加法", answer, "真正改完之后才允许进入验证并结束");
+    }
+
+    @Test
+    void shouldBounceBackToFixWhenVerificationStillFails() throws IOException {
+
+        BuggyCalculatorProject.create(project);
+
+        ScriptedLlmClient llm = new ScriptedLlmClient(
+                "TOOL: run_tests\n",
+                "FINAL: 缺陷在 Calculator.add\n",
+                // 做了一次改动，但改的是错的（内容跟原来一样），测试仍然会失败
+                """
+                TOOL: write_file
+                PATH: src/main/java/com/example/Calculator.java
+                CONTENT:
+                package com.example;
+
+                public class Calculator {
+
+                    public int add(int a, int b) {
+                        return a - b;
+                    }
+                }
+                """,
+                "FINAL: 改好了\n",
+                "TOOL: run_tests\n"
+        );
+
+        AgentLoop loop = new AgentLoop(
+                llm,
+                List.of(new WriteFileTool(project), new RunTestsTool(new MavenTestRunner(), project)),
+                8
+        );
+
+        // 脚本只有五条，退回修复之后会用完——这里关心的是"退回了"这件事
+        assertThrows(RuntimeException.class, () -> loop.run("Calculator.add(2, 3) 返回 -1，但期望是 5"));
+
+        String trace = String.join("\n", loop.transcript());
+        assertTrue(trace.contains("（验证退回）"), "验证跑出失败应该退回修复：\n" + trace);
     }
 }
