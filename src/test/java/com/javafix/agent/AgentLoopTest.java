@@ -134,4 +134,32 @@ class AgentLoopTest {
         assertTrue(answer.contains("复现"), "报告里要说明停在哪个阶段，实际：" + answer);
         assertTrue(answer.contains("总步数预算"), answer);
     }
+
+    @Test
+    void shouldReportProgressWhileItWorks() throws IOException {
+
+        BuggyCalculatorProject.create(project);
+
+        ScriptedLlmClient llm = new ScriptedLlmClient(
+                "TOOL: run_tests\n",
+                "FINAL: 已复现\n",
+                "FINAL: 定位在 Calculator.add\n",
+                "FINAL: 改好了\n",
+                "TOOL: run_tests\n"
+        );
+
+        List<String> events = new java.util.ArrayList<>();
+
+        AgentLoop loop = new AgentLoop(llm, List.of(new RunTestsTool(new MavenTestRunner(), project)), 8)
+                .onProgress(events::add);
+
+        String answer = loop.run("Calculator.add(2, 3) 返回 -1，但期望是 5");
+
+        assertTrue(answer.contains("加法") || answer.contains("改好了"), answer);
+
+        String log = String.join("\n", events);
+        assertTrue(log.contains("思考中"), "要有正在思考的进度提示：" + log);
+        assertTrue(log.contains("→ run_tests"), "执行工具前要报一声：" + log);
+        assertTrue(log.contains("阶段推进"), "阶段切换要有提示：" + log);
+    }
 }

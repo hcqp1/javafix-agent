@@ -16,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.List;
@@ -75,6 +76,12 @@ public class Main {
         );
 
         AgentLoop loop = new AgentLoop(llmClient, tools);
+
+        // 实时进度：一次运行可能十几分钟，中间还夹着几分钟的 Maven 构建，
+        // 不打这行日志的话，用户会以为程序卡死了。
+        loop.onProgress(line -> System.out.println(
+                "[" + LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")) + "] " + line
+        ));
 
         System.out.println("项目：" + project);
         System.out.println("任务：" + task);
