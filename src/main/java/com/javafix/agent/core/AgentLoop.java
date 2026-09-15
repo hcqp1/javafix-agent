@@ -6,6 +6,7 @@ import com.javafix.agent.tool.Tool;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 /**
@@ -61,6 +62,10 @@ public class AgentLoop {
     private final int maxSteps;
     private final List<String> transcript = new ArrayList<>();
 
+    /** 进度回调：每一步都会回一行简短描述，供命令行实时显示。默认什么也不做。 */
+    private Consumer<String> progress = line -> {
+    };
+
     public AgentLoop(LlmClient llmClient, List<Tool> tools) {
         this(llmClient, tools, DEFAULT_MAX_STEPS);
     }
@@ -77,6 +82,18 @@ public class AgentLoop {
 
     public List<Tool> tools() {
         return tools;
+    }
+
+    /**
+     * 注册进度回调。
+     *
+     * <p>一次真实运行可能要十几分钟（中间夹着好几分钟的 Maven 构建），如果期间什么都不打印，
+     * 用户分不清是在干活还是卡死了。有了这个回调，每一步都会实时回一行。
+     */
+    public AgentLoop onProgress(Consumer<String> listener) {
+        this.progress = listener == null ? line -> {
+        } : listener;
+        return this;
     }
 
     /** 运行轨迹：每一步的阶段、动作与观察结果。 */
@@ -99,6 +116,8 @@ public class AgentLoop {
 
         for (int step = 1; step <= maxSteps; step++) {
 
+            emit("[" + phase.label() + " " + (phaseSteps + 1) + "/" + phase.stepBudget() + "] 思考中…");
+
             String response = llmClient.complete(
                     buildPrompt(symptom, phase, lastSummary, step, phaseSteps, buildNudge(phase, phaseSteps, unproductiveSteps))
             );
@@ -108,6 +127,8 @@ public class AgentLoop {
                 action = Action.parse(response);
             } catch (RuntimeException e) {
                 record(phase, step, "(无法解析的回复)\n" + response, "解析失败：" + e.getMessage());
+                emit("[" + phase.label() + " " + (phaseSteps + 1) + "/" + phase.stepBudget()
+                        + "] ！回复格式不对，已要求重试");
                 phaseSteps++;
                 continue;
             }
@@ -117,10 +138,13 @@ public class AgentLoop {
                 lastSummary = action.finalAnswer();
 
                 if (phase == Phase.VERIFY) {
+                    emit("验证通过，任务完成");
                     return lastSummary;
                 }
 
-                phase = phase.next();
+                Phase next = phase.next();
+                emit("阶段推进：" + phase.label() + " → " + next.label());
+                phase = next;
                 phaseSteps = 0;
                 unproductiveSteps = 0;
                 continue;
@@ -134,12 +158,22 @@ public class AgentLoop {
                         describe(action),
                         "复现阶段禁止修改 src/main 下的代码；先把现象复现成 src/test 下的一条失败测试。"
                 );
+                emit("[" + phase.label() + " " + (phaseSteps + 1) + "/" + phase.stepBudget()
+                        + "] ！拦下一次改生产代码的尝试");
                 phaseSteps++;
                 unproductiveSteps++;
                 continue;
             }
 
+            emit("[" + phase.label() + " " + (phaseSteps + 1) + "/" + phase.stepBudget()
+                    + "] → " + action.toolName());
+
+            long toolStartedAt = System.nanoTime();
             String observation = execute(action);
+
+            emit("[" + phase.label() + " " + (phaseSteps + 1) + "/" + phase.stepBudget()
+                    + "] ← " + elapsedSeconds(toolStartedAt) + "s  " + firstLine(observation));
+
             record(phase, step, describe(action), observation);
             phaseSteps++;
 
@@ -150,6 +184,7 @@ public class AgentLoop {
 
             if (phase == Phase.REPRODUCE && FAILING_TEST.matcher(observation).find()) {
                 lastSummary = "已复现一条失败测试";
+                emit("阶段推进：复现 → 定位（已经有一条失败的测试了）");
                 phase = Phase.LOCALIZE;
                 phaseSteps = 0;
                 unproductiveSteps = 0;
@@ -168,13 +203,35 @@ public class AgentLoop {
                         "「" + phase.label() + "」最多 " + phase.stepBudget() + " 步，已用完，转入下一阶段。"
                 );
                 lastSummary = "「" + phase.label() + "」阶段目标未达成，步数预算已用完";
-                phase = phase.next();
+                Phase next = phase.next();
+                emit("本阶段预算用完，转入：" + next.label());
+                phase = next;
                 phaseSteps = 0;
                 unproductiveSteps = 0;
             }
         }
 
+        emit("步数预算用尽，输出状态报告");
         return report(symptom, phase, lastSummary);
+    }
+
+    private void emit(String line) {
+        progress.accept(line);
+    }
+
+    private static String elapsedSeconds(long startedAt) {
+        return String.format(java.util.Locale.ROOT, "%.1f", (System.nanoTime() - startedAt) / 1_000_000_000.0);
+    }
+
+    /** 观察结果的第一行，截断到 100 字符——进度提示只需要点一下发生了什么。 */
+    private static String firstLine(String observation) {
+
+        if (observation == null || observation.isBlank()) {
+            return "(无输出)";
+        }
+
+        String line = observation.strip().lines().findFirst().orElse("").strip();
+        return line.length() <= 100 ? line : line.substring(0, 100) + "…";
     }
 
     /** 到预算上限时给一份状态报告，而不是抛异常——白跑十几步什么都不留是最差的结果。 */
