@@ -1,6 +1,7 @@
 package com.javafix.agent.tool;
 
 import java.nio.file.Path;
+import java.util.Map;
 
 /**
  * 作用于某个代码仓库的工具的公共基类：绑定仓库根目录，并把相对路径安全地解析出来。
@@ -39,5 +40,33 @@ abstract class ProjectTool implements Tool {
     /** 反过来的操作：把绝对路径变回仓库内的相对路径，用于给模型一个可读的反馈。 */
     protected String relative(Path path) {
         return root.relativize(path).toString();
+    }
+
+    /**
+     * 拒绝不认识的参数。
+     *
+     * <p>静默忽略参数是所有接口设计里最坏的一种：模型传了一个我们没实现的名字，
+     * 它拿不到任何反馈，只能一遍遍换着猜。真实运行里就吃过这个亏——{@code search_code}
+     * 当时不支持 {@code path}，而模型一直想用它收窄搜索范围，七步就这么烧掉了。
+     * 所以宁可当场报错，把"支持哪些参数"明明白白地说回去。
+     */
+    protected static void rejectUnknownArguments(Map<String, String> arguments, String... supported) {
+
+        for (String name : arguments.keySet()) {
+
+            boolean known = false;
+            for (String candidate : supported) {
+                if (candidate.equals(name)) {
+                    known = true;
+                    break;
+                }
+            }
+
+            if (!known) {
+                throw new IllegalArgumentException(
+                        "不支持的参数：" + name + "；支持的参数是 " + String.join("、", supported)
+                );
+            }
+        }
     }
 }

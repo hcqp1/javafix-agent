@@ -32,6 +32,8 @@ public class ReadFileTool extends ProjectTool {
     @Override
     public String execute(Map<String, String> arguments) {
 
+        rejectUnknownArguments(arguments, "path");
+
         Path file = resolve(arguments.get("path"));
 
         if (!Files.isRegularFile(file)) {

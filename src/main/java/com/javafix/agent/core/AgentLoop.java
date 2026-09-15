@@ -4,28 +4,37 @@ import com.javafix.agent.llm.LlmClient;
 import com.javafix.agent.tool.Tool;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.regex.Pattern;
 
 /**
  * Agent 主循环，按「复现 -> 定位 -> 修复 -> 验证」四个阶段编排。
  *
- * <p>输入从「给了位置的 bug 描述」改成「用户报告的现象」，Agent 自己复现、自己定位、
- * 自己修、自己验证。阶段的推进由两条路触发：模型输出 FINAL 表示"这个阶段我做完了"，
+ * <p>输入是用户报告的现象，Agent 自己复现、自己定位、自己修、自己验证。
+ * 阶段的推进由两条路触发：模型输出 FINAL 表示"这个阶段我做完了"，
  * 或者代码识别到可判定的出口条件（比如复现阶段看到了失败测试）。
+ *
+ * <p>步数预算是分层的：每个阶段有自己的预算，总和是整条任务的兜底预算。
+ * 预算还会写进每一步的提示词——<b>预算只有在被看见的时候才会影响行为</b>；
+ * 之前只给一个总数、模型完全不知道还剩多少，结果是 16 步全耗在第一个阶段的探索上。
  */
 public class AgentLoop {
 
-    private static final int DEFAULT_MAX_STEPS = 16;
+    /** 整条任务的兜底预算：各阶段预算之和。 */
+    private static final int DEFAULT_MAX_STEPS =
+            Arrays.stream(Phase.values()).mapToInt(Phase::stepBudget).sum();
 
     /**
      * 单条观察结果回灌给模型时的长度上限。
      *
      * <p>一次 read_file 就可能带回几百行，而这些内容会被完整写进轨迹、
-     * 并在之后的每一步重新发一遍。实测一次真实运行 16 步累计了 36 万输入 token，
-     * 到后半程模型已经分不清哪些是当前任务、哪些是历史噪音了。
+     * 并在之后的每一步重新发一遍。
      */
     private static final int MAX_OBSERVATION_CHARS = 4000;
+
+    /** 复现阶段连续这么多步还没有产出，就开始催。 */
+    private static final int STALL_THRESHOLD = 3;
 
     /** 一条测试失败，用于判定"复现"阶段完成。 */
     private static final Pattern FAILING_TEST =
@@ -76,36 +85,44 @@ public class AgentLoop {
     }
 
     /**
-     * 运行 Agent，直到验证通过或达到最大步数。
+     * 运行 Agent，直到验证通过或预算用尽。
      *
      * @param symptom 用户报告的现象，例如"下单偶尔少一条记录"，而不是已经定位好的位置
-     * @return 给用户的最终答复
-     * @throws IllegalStateException 达到最大步数仍未完成
+     * @return 验证通过时是最终答复；预算用尽时是一份状态报告
      */
     public String run(String symptom) {
 
         Phase phase = Phase.REPRODUCE;
         String lastSummary = null;
+        int phaseSteps = 0;
+        int unproductiveSteps = 0;
 
         for (int step = 1; step <= maxSteps; step++) {
 
-            String response = llmClient.complete(buildPrompt(symptom, phase, lastSummary));
+            String response = llmClient.complete(
+                    buildPrompt(symptom, phase, lastSummary, step, phaseSteps, buildNudge(phase, phaseSteps, unproductiveSteps))
+            );
 
             Action action;
             try {
                 action = Action.parse(response);
             } catch (RuntimeException e) {
                 record(phase, step, "(无法解析的回复)\n" + response, "解析失败：" + e.getMessage());
+                phaseSteps++;
                 continue;
             }
 
             if (action.isFinal()) {
                 record(phase, step, "阶段结论：" + action.finalAnswer(), "");
                 lastSummary = action.finalAnswer();
+
                 if (phase == Phase.VERIFY) {
                     return lastSummary;
                 }
+
                 phase = phase.next();
+                phaseSteps = 0;
+                unproductiveSteps = 0;
                 continue;
             }
 
@@ -117,24 +134,114 @@ public class AgentLoop {
                         describe(action),
                         "复现阶段禁止修改 src/main 下的代码；先把现象复现成 src/test 下的一条失败测试。"
                 );
+                phaseSteps++;
+                unproductiveSteps++;
                 continue;
             }
 
             String observation = execute(action);
             record(phase, step, describe(action), observation);
+            phaseSteps++;
+
+            // "产出"指的是写文件或跑测试；只是搜索、读文件不算——那样可以永远探索下去
+            boolean produced = "write_file".equals(action.toolName())
+                    || "run_tests".equals(action.toolName());
+            unproductiveSteps = produced ? 0 : unproductiveSteps + 1;
 
             if (phase == Phase.REPRODUCE && FAILING_TEST.matcher(observation).find()) {
                 lastSummary = "已复现一条失败测试";
                 phase = Phase.LOCALIZE;
-            } else if (phase == Phase.VERIFY && PASSING_TEST.matcher(observation).find()) {
+                phaseSteps = 0;
+                unproductiveSteps = 0;
+                continue;
+            }
+
+            if (phase == Phase.VERIFY && PASSING_TEST.matcher(observation).find()) {
                 return lastSummary == null ? "验证通过" : lastSummary;
+            }
+
+            if (phaseSteps >= phase.stepBudget()) {
+                record(
+                        phase,
+                        step,
+                        "（本阶段预算用完）",
+                        "「" + phase.label() + "」最多 " + phase.stepBudget() + " 步，已用完，转入下一阶段。"
+                );
+                lastSummary = "「" + phase.label() + "」阶段目标未达成，步数预算已用完";
+                phase = phase.next();
+                phaseSteps = 0;
+                unproductiveSteps = 0;
             }
         }
 
-        throw new IllegalStateException("达到最大步数 " + maxSteps + " 仍未完成任务：" + symptom);
+        return report(symptom, phase, lastSummary);
     }
 
-    private String buildPrompt(String symptom, Phase phase, String lastSummary) {
+    /** 到预算上限时给一份状态报告，而不是抛异常——白跑十几步什么都不留是最差的结果。 */
+    private String report(String symptom, Phase phase, String lastSummary) {
+
+        StringBuilder report = new StringBuilder();
+        report.append("没能完成这个任务。以下是停下来时的状态。\n\n");
+        report.append("任务：").append(symptom).append('\n');
+        report.append("停在阶段：").append(phase.label()).append('\n');
+        report.append("总步数预算 ").append(maxSteps).append(" 步已用尽\n");
+
+        if (lastSummary != null) {
+            report.append("上一阶段的结论：").append(lastSummary).append('\n');
+        }
+
+        report.append("\n最后几步在做什么：\n");
+        int from = Math.max(0, transcript.size() - 3);
+        for (int i = from; i < transcript.size(); i++) {
+            report.append("- ").append(brief(transcript.get(i))).append('\n');
+        }
+
+        report.append("\n建议：根据上面的轨迹判断是线索不足、还是工具或环境的问题，再决定是否重跑。\n");
+        return report.toString();
+    }
+
+    private static String brief(String entry) {
+
+        String[] lines = entry.split("\n");
+        StringBuilder brief = new StringBuilder(lines.length > 0 ? lines[0] : entry);
+
+        for (int i = 1; i < lines.length; i++) {
+            if (lines[i].startsWith("调用了工具：") || lines[i].startsWith("阶段结论：")) {
+                brief.append("  ").append(lines[i]);
+                break;
+            }
+        }
+
+        return brief.toString();
+    }
+
+    /** 该催的时候催一句：快用完预算了，或者连续好几步只探索没产出。 */
+    private static String buildNudge(Phase phase, int phaseSteps, int unproductiveSteps) {
+
+        if (phase != Phase.REPRODUCE) {
+            return null;
+        }
+
+        if (unproductiveSteps >= STALL_THRESHOLD) {
+            return "你已经连续 " + unproductiveSteps + " 步只做探索、没有产出。下一步必须二选一："
+                    + "写出复现测试（write_file 到 src/test 下），或者运行测试（run_tests）。";
+        }
+
+        if (phaseSteps >= phase.stepBudget() - 1) {
+            return "本阶段只剩最后一步：请在这一步内拿出能失败的复现测试，"
+                    + "否则将带着「未复现」进入下一阶段。";
+        }
+
+        return null;
+    }
+
+    private String buildPrompt(
+            String symptom,
+            Phase phase,
+            String lastSummary,
+            int step,
+            int phaseSteps,
+            String nudge) {
 
         StringBuilder prompt = new StringBuilder();
 
@@ -142,6 +249,14 @@ public class AgentLoop {
                 .append(phase.label())
                 .append("\n\n");
         prompt.append(phase.instruction()).append("\n");
+
+        prompt.append("\n预算：整个任务共 ").append(maxSteps).append(" 步，已用 ").append(step - 1)
+                .append(" 步；当前阶段最多 ").append(phase.stepBudget())
+                .append(" 步，已用 ").append(phaseSteps).append(" 步。\n");
+
+        if (nudge != null) {
+            prompt.append("\n注意：").append(nudge).append('\n');
+        }
 
         prompt.append("\n用户报告的现象：\n").append(symptom).append("\n\n");
 
@@ -209,8 +324,7 @@ public class AgentLoop {
      * 把一步动作渲染给模型看。
      *
      * <p>刻意不按协议的样子写（不出现 TOOL、参数名这类形状）：模型会把提示词和轨迹里
-     * "看起来能直接照抄的形状"当成模板模仿，之前两次翻车都是这么来的。
-     * 协议只在 {@code ACTION_FORMAT} 那一处说明，轨迹这里用自然语言描述。
+     * "看起来能直接照抄的形状"当成模板模仿。协议只在 {@code ACTION_FORMAT} 那一处说明。
      */
     private String describe(Action action) {
         String parameterNames = action.arguments().isEmpty()

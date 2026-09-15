@@ -116,4 +116,22 @@ class AgentLoopTest {
         );
         assertTrue(source.contains("return a - b;"), "生产代码不该被修改，实际内容：\n" + source);
     }
+
+    @Test
+    void shouldReportStatusInsteadOfThrowingWhenTheBudgetRunsOut() {
+
+        ScriptedLlmClient llm = new ScriptedLlmClient(
+                "TOOL: search_code\nQUERY: nothing\n",
+                "TOOL: search_code\nQUERY: nothing\n",
+                "TOOL: search_code\nQUERY: nothing\n"
+        );
+
+        AgentLoop loop = new AgentLoop(llm, List.of(new SearchCodeTool(project)), 3);
+
+        String answer = loop.run("随便一个现象");
+
+        assertTrue(answer.contains("没能完成"), "预算用尽时要给状态报告，实际：" + answer);
+        assertTrue(answer.contains("复现"), "报告里要说明停在哪个阶段，实际：" + answer);
+        assertTrue(answer.contains("总步数预算"), answer);
+    }
 }

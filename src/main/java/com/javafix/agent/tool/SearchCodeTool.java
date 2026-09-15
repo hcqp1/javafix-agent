@@ -45,11 +45,14 @@ public class SearchCodeTool extends ProjectTool {
     @Override
     public String description() {
         return "在仓库中按关键字或正则搜索代码，返回命中的文件与行号。"
-                + "参数：query（要搜索的内容）；可选参数 regex=true 表示把 query 当正则表达式。";
+                + "参数：query（要搜索的内容）；可选参数 regex=true 表示把 query 当正则表达式；"
+                + "可选参数 path 把搜索限制在某个目录或文件里（大仓库里务必用它，否则会返回大量无关命中）。";
     }
 
     @Override
     public String execute(Map<String, String> arguments) {
+
+        rejectUnknownArguments(arguments, "query", "regex", "path");
 
         String query = arguments.get("query");
 
@@ -63,29 +66,23 @@ public class SearchCodeTool extends ProjectTool {
         List<String> matches = new ArrayList<>();
         boolean truncated = false;
 
-        try (Stream<Path> paths = Files.walk(root)) {
+        for (Path path : collectFiles(arguments.get("path"))) {
 
-            for (Path path : paths.filter(Files::isRegularFile).toList()) {
-
-                if (isSkipped(path)) {
-                    continue;
-                }
-
-                for (String match : searchFile(path, pattern)) {
-                    if (matches.size() >= MAX_MATCHES) {
-                        truncated = true;
-                        break;
-                    }
-                    matches.add(match);
-                }
-
-                if (truncated) {
-                    break;
-                }
+            if (isSkipped(path)) {
+                continue;
             }
 
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
+            for (String match : searchFile(path, pattern)) {
+                if (matches.size() >= MAX_MATCHES) {
+                    truncated = true;
+                    break;
+                }
+                matches.add(match);
+            }
+
+            if (truncated) {
+                break;
+            }
         }
 
         if (matches.isEmpty()) {
@@ -94,6 +91,31 @@ public class SearchCodeTool extends ProjectTool {
 
         String result = String.join("\n", matches);
         return truncated ? result + "\n（命中超过 " + MAX_MATCHES + " 条，已截断）" : result;
+    }
+
+    /**
+     * 收集这次要搜索的文件。
+     *
+     * <p>支持把范围收窄到某个目录或单个文件。大仓库里这是必需的能力：不加限定地搜一个常见词，
+     * 会返回几百条无关命中——对定位没有帮助，还会把上下文挤满。
+     */
+    private List<Path> collectFiles(String pathArgument) {
+
+        List<Path> files = new ArrayList<>();
+        Path start = pathArgument == null || pathArgument.isBlank() ? root : resolve(pathArgument);
+
+        if (Files.isRegularFile(start)) {
+            files.add(start);
+            return files;
+        }
+
+        try (Stream<Path> paths = Files.walk(start)) {
+            paths.filter(Files::isRegularFile).forEach(files::add);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+
+        return files;
     }
 
     private List<String> searchFile(Path file, Pattern pattern) {

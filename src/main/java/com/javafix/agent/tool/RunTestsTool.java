@@ -53,6 +53,8 @@ public class RunTestsTool extends ProjectTool {
     @Override
     public String execute(Map<String, String> arguments) {
 
+        rejectUnknownArguments(arguments, "test");
+
         TestResult result = testRunner.run(root, arguments.get("test"));
 
         StringBuilder observation = new StringBuilder();
