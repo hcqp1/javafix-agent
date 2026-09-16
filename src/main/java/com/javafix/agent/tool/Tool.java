@@ -1,6 +1,8 @@
 package com.javafix.agent.tool;
 
 import java.util.Map;
+import java.nio.file.Path;
+import java.util.Optional;
 
 /**
  * Agent 可调用工具的统一抽象。
@@ -34,4 +36,14 @@ public interface Tool {
      * @return 工具执行结果的文本表示
      */
     String execute(Map<String, String> arguments);
+
+    /**
+     * 这个工具作用的项目根目录。
+     *
+     * <p>给"判断工作区有没有改动"用的：有的工具（文件读写）绑定在某个项目上，
+     * 有的（比如纯计算的工具）没有。默认没有。
+     */
+    default Optional<Path> projectRoot() {
+        return Optional.empty();
+    }
 }

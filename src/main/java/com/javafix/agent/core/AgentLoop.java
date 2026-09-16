@@ -2,7 +2,9 @@ package com.javafix.agent.core;
 
 import com.javafix.agent.llm.LlmClient;
 import com.javafix.agent.tool.Tool;
+import com.javafix.agent.tool.WorkspaceStatus;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -51,13 +53,16 @@ public class AgentLoop {
     private static final String ACTION_FORMAT = """
 
             请严格按下面的格式回复，每次只输出一个动作。
-            要调用工具时，回复由若干行组成：第一行以 THOUGHT 加冒号开头，写你这一步的思路；
-            第二行以 TOOL 加冒号开头，写工具名；之后每个参数占一行，行首是参数名
+            第一行以 THOUGHT 加冒号开头，写你这一步的思路：只写一行，控制在 50 字以内，
+            不要复述已经知道的信息，也不要写长篇推理。
+            要调用工具时，回复由若干行组成：第二行以 TOOL 加冒号开头，写工具名；
+            之后每个参数占一行，行首是参数名
             （全大写英文，例如 PATH、CONTENT）加冒号，后面跟参数值。
             参数值可以有多行（比如一整个文件的内容）：从参数名那一行的下一行开始写，
             一直写到下一个参数名为止。
             分隔符请用英文半角冒号，不要用中文输入法打出来的全角冒号。
             当前阶段完成时，用 FINAL 加冒号输出本阶段的结论。
+            一条回复里只给一个动作，不要写多个动作块。
             """;
 
     private final LlmClient llmClient;
@@ -144,9 +149,13 @@ public class AgentLoop {
                 record(phase, step, "阶段结论：" + action.finalAnswer(), "");
                 lastSummary = action.finalAnswer();
 
+                // 用工作区状态判断"到底改没改代码"，而不是看 write_file 的返回文本——
+                // 模型改用 shell 编辑文件就绕过去了，真实运行里发生过
+                boolean codeChanged = sourceChanged || mainSourcesChangedNow();
+
                 if (phase == Phase.VERIFY) {
                     // 验证阶段发现"什么都没改"，说明修复阶段是空转的，退回重做
-                    if (!sourceChanged && fixRounds < MAX_FIX_ROUNDS) {
+                    if (!codeChanged && fixRounds < MAX_FIX_ROUNDS) {
                         fixRounds++;
                         emit("没有任何代码改动，退回修复阶段（第 " + fixRounds + " 轮）");
                         record(phase, step, "（验证退回）",
@@ -161,11 +170,12 @@ public class AgentLoop {
                 }
 
                 // 修复阶段不许空手离开：阶段出口由代码判定，不交给模型自觉
-                if (phase == Phase.FIX && !sourceChanged && phaseSteps < phase.stepBudget()) {
+                if (phase == Phase.FIX && !codeChanged && phaseSteps < phase.stepBudget()) {
                     emit("修复阶段还没改任何文件，不许离开这一阶段");
                     record(phase, step, "（修复阶段未产出）",
                             "修复阶段到目前为止没有改动任何文件——只在代码里查找不算完成修复。"
-                                    + "下一步必须用 write_file 落地一个最小改动。");
+                                    + "下一步必须用 write_file 落地一个最小改动（用 shell 改文件不算，"
+                                    + "那种改动不会被流程认可）。");
                     phaseSteps++;
                     continue;
                 }
@@ -279,6 +289,16 @@ public class AgentLoop {
 
         String line = observation.strip().lines().findFirst().orElse("").strip();
         return line.length() <= 100 ? line : line.substring(0, 100) + "…";
+    }
+
+    /** 从工具身上找到项目根目录，再问 git 工作区有没有改动。 */
+    private boolean mainSourcesChangedNow() {
+        return tools.stream()
+                .map(Tool::projectRoot)
+                .flatMap(java.util.Optional::stream)
+                .findFirst()
+                .map(WorkspaceStatus::mainSourcesChanged)
+                .orElse(false);
     }
 
     /** 到预算上限时给一份状态报告，而不是抛异常——白跑十几步什么都不留是最差的结果。 */
@@ -448,12 +468,37 @@ public class AgentLoop {
      * "看起来能直接照抄的形状"当成模板模仿。协议只在 {@code ACTION_FORMAT} 那一处说明。
      */
     private String describe(Action action) {
-        String parameterNames = action.arguments().isEmpty()
-                ? "无"
-                : String.join("、", action.arguments().keySet());
-        return "思路：" + action.thought()
-                + "\n调用了工具：" + action.toolName()
-                + "\n参数：" + parameterNames;
+
+        StringBuilder description = new StringBuilder("思路：" + action.thought());
+        description.append("\n调用了工具：").append(action.toolName());
+
+        if (action.arguments().isEmpty()) {
+            return description.append("\n参数：无").toString();
+        }
+
+        action.arguments().forEach((name, value) ->
+                description.append("\n参数 ").append(name).append(" = ").append(shorten(value)));
+
+        return description.toString();
+    }
+
+    /**
+     * 参数值的可读形式：只留第一行，最长 200 字符。
+     *
+     * <p>之前为了防"格式被照抄"，轨迹里只显示参数名不显示值。结果排查时看不出模型到底执行了什么命令，
+     * 模型自己也失去了"我刚跑过什么"的记忆。现在用「参数 名字 = 值」这种描述性写法，
+     * 它不像动作语法，不会被当成模板照抄。
+     */
+    private static String shorten(String value) {
+
+        if (value == null) {
+            return "(空)";
+        }
+
+        String firstLine = value.strip().lines().findFirst().orElse("").strip();
+        String shown = firstLine.length() <= 200 ? firstLine : firstLine.substring(0, 200) + "…";
+
+        return value.lines().count() > 1 ? shown + "（还有更多行）" : shown;
     }
 
     private String toolNames() {
