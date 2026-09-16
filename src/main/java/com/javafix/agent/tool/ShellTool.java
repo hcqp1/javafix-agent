@@ -46,7 +46,8 @@ public class ShellTool extends ProjectTool {
         return "在仓库根目录执行一条 shell 命令并返回输出。参数：command（要执行的命令）。"
                 + "当前平台是 " + (windows ? "Windows" : "类 Unix") + "，命令必须符合该平台的语法"
                 + (windows ? "（例如 dir、findstr、where，而不是 ls、grep、find、head）" : "")
-                + "。只是想查看仓库里的文件时，优先用 search_code 和 read_file，不要绕道 shell。";
+                + "。只是想查看仓库里的文件时，优先用 search_code 和 read_file，不要绕道 shell。"
+                + "修改代码请用 write_file，不要用 shell 去改文件——那样既容易改错，也无法被流程追踪。";
     }
 
     @Override

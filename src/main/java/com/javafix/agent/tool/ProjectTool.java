@@ -2,6 +2,7 @@ package com.javafix.agent.tool;
 
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * 作用于某个代码仓库的工具的公共基类：绑定仓库根目录，并把相对路径安全地解析出来。
@@ -40,6 +41,11 @@ abstract class ProjectTool implements Tool {
     /** 反过来的操作：把绝对路径变回仓库内的相对路径，用于给模型一个可读的反馈。 */
     protected String relative(Path path) {
         return root.relativize(path).toString();
+    }
+
+    @Override
+    public Optional<Path> projectRoot() {
+        return Optional.of(root);
     }
 
     /**
