@@ -124,8 +124,18 @@ public class AgentLoop {
         boolean sourceChanged = false;
         boolean sawPassingTest = false;
         int fixRounds = 1;
+        Phase countedPhase = null;
+        int testsRunInPhase = 0;
+        boolean lastTestPassedInPhase = false;
 
         for (int step = 1; step <= maxSteps; step++) {
+
+            // 每个阶段的"跑过几次测试"单独计数
+            if (countedPhase != phase) {
+                countedPhase = phase;
+                testsRunInPhase = 0;
+                lastTestPassedInPhase = false;
+            }
 
             emit("[" + phase.label() + " " + (phaseSteps + 1) + "/" + phase.stepBudget() + "] 思考中…");
 
@@ -154,6 +164,26 @@ public class AgentLoop {
                 boolean codeChanged = sourceChanged || mainSourcesChangedNow();
 
                 if (phase == Phase.VERIFY) {
+                    // 一次测试都没跑就说验证完成——这是最常见的"假完成"，直接拒绝
+                    if (testsRunInPhase == 0) {
+                        emit("验证阶段一次测试都没跑，不许结束");
+                        record(phase, step, "（验证阶段未跑测试）",
+                                "验证阶段还没有运行过任何测试，无法确认修复是否有效。"
+                                        + "下一步必须用 run_tests 跑一次相关的测试。");
+                        phaseSteps++;
+                        continue;
+                    }
+
+                    if (!lastTestPassedInPhase && fixRounds < MAX_FIX_ROUNDS) {
+                        fixRounds++;
+                        emit("验证不通过，退回修复阶段（第 " + fixRounds + " 轮）");
+                        record(phase, step, "（验证退回）", "验证阶段的测试没有全绿，退回修复阶段继续改。");
+                        phase = Phase.FIX;
+                        phaseSteps = 0;
+                        unproductiveSteps = 0;
+                        continue;
+                    }
+
                     // 验证阶段发现"什么都没改"，说明修复阶段是空转的，退回重做
                     if (!codeChanged && fixRounds < MAX_FIX_ROUNDS) {
                         fixRounds++;
@@ -165,7 +195,7 @@ public class AgentLoop {
                         unproductiveSteps = 0;
                         continue;
                     }
-                    emit("验证通过，任务完成");
+                    emit("验证阶段结束，任务完成");
                     return lastSummary;
                 }
 
@@ -203,6 +233,22 @@ public class AgentLoop {
                 continue;
             }
 
+            // 复现阶段的第一个动作必须是跑测试：没有基线就谈不上"复现"
+            if (phase == Phase.REPRODUCE && testsRunInPhase == 0 && !"run_tests".equals(action.toolName())) {
+                record(
+                        phase,
+                        step,
+                        describe(action),
+                        "复现阶段的第一个动作必须是 run_tests——先跑一遍现有测试，看清有没有已经失败的。"
+                                + "在那之前不做别的。"
+                );
+                emit("[" + phase.label() + " " + (phaseSteps + 1) + "/" + phase.stepBudget()
+                        + "] ！复现阶段的第一个动作必须是 run_tests");
+                phaseSteps++;
+                unproductiveSteps++;
+                continue;
+            }
+
             emit("[" + phase.label() + " " + (phaseSteps + 1) + "/" + phase.stepBudget()
                     + "] → " + action.toolName());
 
@@ -221,8 +267,12 @@ public class AgentLoop {
             if (wroteFile) {
                 sourceChanged = true;
             }
-            if (ranTests && PASSING_TEST.matcher(observation).find()) {
-                sawPassingTest = true;
+            if (ranTests) {
+                testsRunInPhase++;
+                lastTestPassedInPhase = looksPassing(observation);
+                if (lastTestPassedInPhase) {
+                    sawPassingTest = true;
+                }
             }
 
             // "产出"指的是写文件或跑测试；只是搜索、读文件不算——那样可以永远探索下去
@@ -237,7 +287,7 @@ public class AgentLoop {
                 continue;
             }
 
-            if (phase == Phase.VERIFY && PASSING_TEST.matcher(observation).find()) {
+            if (phase == Phase.VERIFY && looksPassing(observation)) {
                 return lastSummary == null ? "验证通过" : lastSummary;
             }
 
@@ -270,6 +320,11 @@ public class AgentLoop {
 
         emit("步数预算用尽，输出状态报告");
         return report(symptom, phase, lastSummary);
+    }
+
+    /** 观察结果看起来是"全部通过"：有通过行，且没有任何失败行。 */
+    private static boolean looksPassing(String observation) {
+        return PASSING_TEST.matcher(observation).find() && !FAILING_TEST.matcher(observation).find();
     }
 
     private void emit(String line) {
