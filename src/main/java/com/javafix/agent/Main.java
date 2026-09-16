@@ -5,6 +5,7 @@ import com.javafix.agent.llm.LlmClient;
 import com.javafix.agent.llm.OpenAiCompatibleLlmClient;
 import com.javafix.agent.tool.MavenTestRunner;
 import com.javafix.agent.tool.ReadFileTool;
+import com.javafix.agent.tool.ReplaceInFileTool;
 import com.javafix.agent.tool.RunTestsTool;
 import com.javafix.agent.tool.SearchCodeTool;
 import com.javafix.agent.tool.ShellTool;
@@ -69,6 +70,7 @@ public class Main {
 
         List<Tool> tools = List.of(
                 new ReadFileTool(project),
+                new ReplaceInFileTool(project),
                 new SearchCodeTool(project),
                 new WriteFileTool(project),
                 new RunTestsTool(new MavenTestRunner(), project),

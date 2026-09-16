@@ -5,6 +5,7 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -26,13 +27,15 @@ public class ReadFileTool extends ProjectTool {
 
     @Override
     public String description() {
-        return "读取仓库中某个文件的内容。参数：path（相对仓库根目录的路径）。";
+        return "读取仓库中某个文件的内容。参数：path（相对仓库根目录的路径）；"
+                + "可选参数 start、end 指定行号区间（从 1 开始、含两端），"
+                + "大文件请分段读，一次读太多会被截断。";
     }
 
     @Override
     public String execute(Map<String, String> arguments) {
 
-        rejectUnknownArguments(arguments, "path");
+        rejectUnknownArguments(arguments, "path", "start", "end");
 
         Path file = resolve(arguments.get("path"));
 
@@ -41,9 +44,39 @@ public class ReadFileTool extends ProjectTool {
         }
 
         try {
-            return Files.readString(file, StandardCharsets.UTF_8);
+            List<String> lines = Files.readAllLines(file, StandardCharsets.UTF_8);
+
+            int start = lineNumber(arguments.get("start"), 1);
+            int end = lineNumber(arguments.get("end"), lines.size());
+
+            if (start < 1 || end > lines.size() || start > end) {
+                throw new IllegalArgumentException(
+                        "行号超出范围：" + relative(file) + " 一共 " + lines.size()
+                                + " 行，请求的是 " + start + "-" + end);
+            }
+
+            if (start == 1 && end == lines.size()) {
+                return String.join("\n", lines);
+            }
+
+            return "（" + relative(file) + " 第 " + start + "-" + end + " 行，共 " + lines.size() + " 行）\n"
+                    + String.join("\n", lines.subList(start - 1, end));
+
         } catch (IOException e) {
             throw new UncheckedIOException(e);
+        }
+    }
+
+    private static int lineNumber(String value, int fallback) {
+
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+
+        try {
+            return Integer.parseInt(value.strip());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("行号必须是数字：" + value);
         }
     }
 }
