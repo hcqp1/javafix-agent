@@ -260,4 +260,62 @@ class AgentLoopTest {
         String trace = String.join("\n", loop.transcript());
         assertTrue(trace.contains("（验证退回）"), "验证跑出失败应该退回修复：\n" + trace);
     }
+
+    @Test
+    void shouldRequireRunningTestsBeforeAnythingElseInReproduce() throws IOException {
+
+        BuggyCalculatorProject.create(project);
+
+        ScriptedLlmClient llm = new ScriptedLlmClient("TOOL: search_code\nQUERY: Calculator\n");
+
+        AgentLoop loop = new AgentLoop(
+                llm,
+                List.of(new SearchCodeTool(project), new RunTestsTool(new MavenTestRunner(), project)),
+                3
+        );
+
+        // 脚本只有一条，被拒之后下一步就会耗尽——这里关心的是"被拦住了"
+        assertThrows(RuntimeException.class, () -> loop.run("Calculator.add(2, 3) 返回 -1，但期望是 5"));
+
+        String trace = String.join("\n", loop.transcript());
+        assertTrue(trace.contains("第一个动作必须是 run_tests"), "复现阶段不许先干别的：\n" + trace);
+    }
+
+    @Test
+    void shouldNotFinishVerifyWithoutRunningTests() throws IOException {
+
+        BuggyCalculatorProject.create(project);
+
+        ScriptedLlmClient llm = new ScriptedLlmClient(
+                "TOOL: run_tests\n",
+                "FINAL: 缺陷在 Calculator.add\n",
+                """
+                TOOL: write_file
+                PATH: src/main/java/com/example/Calculator.java
+                CONTENT:
+                package com.example;
+
+                public class Calculator {
+
+                    public int add(int a, int b) {
+                        return a + b;
+                    }
+                }
+                """,
+                "FINAL: 把减法改成了加法\n",
+                // 验证阶段：一次测试都没跑，直接宣布完成——这一步应该被拒绝
+                "FINAL: 我确信已经修好了\n"
+        );
+
+        AgentLoop loop = new AgentLoop(
+                llm,
+                List.of(new WriteFileTool(project), new RunTestsTool(new MavenTestRunner(), project)),
+                8
+        );
+
+        assertThrows(RuntimeException.class, () -> loop.run("Calculator.add(2, 3) 返回 -1，但期望是 5"));
+
+        String trace = String.join("\n", loop.transcript());
+        assertTrue(trace.contains("（验证阶段未跑测试）"), "没跑测试不许宣布验证完成：\n" + trace);
+    }
 }
