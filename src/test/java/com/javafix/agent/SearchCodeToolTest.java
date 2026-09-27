@@ -52,4 +52,16 @@ class SearchCodeToolTest {
         assertTrue(failure.getMessage().contains("grep"), "要说清哪个参数不被支持：" + failure.getMessage());
         assertTrue(failure.getMessage().contains("query"), "要列出支持的参数：" + failure.getMessage());
     }
+
+    @Test
+    void shouldSayClearlyWhenThePathDoesNotExist() {
+
+        // 多模块仓库的根目录下通常没有 src/main——模型真实这么猜过一次
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> new SearchCodeTool(project).execute(Map.of("query", "x", "path", "src/main"))
+        );
+
+        assertTrue(failure.getMessage().contains("路径不存在"), "要说人话，别甩 NoSuchFileException：" + failure.getMessage());
+    }
 }

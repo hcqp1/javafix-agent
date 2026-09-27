@@ -59,7 +59,14 @@ public class RunTestsTool extends ProjectTool {
 
         StringBuilder observation = new StringBuilder();
 
-        observation.append(result.isSuccess() ? "测试通过。" : "测试未通过。");
+        if (result.isSuccess()) {
+            observation.append("测试通过。");
+        } else if (result.getExitCode() == TestResult.EXIT_TIMEOUT) {
+            // 超时和"跑完了但失败"是两回事：前者根本没有结论，不能当成失败证据
+            observation.append("测试超时，没有跑完。");
+        } else {
+            observation.append("测试未通过。");
+        }
         observation.append("（退出码 ").append(result.getExitCode()).append("）\n");
         observation.append(summarize(result.getStdout()));
 

@@ -104,6 +104,14 @@ public class SearchCodeTool extends ProjectTool {
         List<Path> files = new ArrayList<>();
         Path start = pathArgument == null || pathArgument.isBlank() ? root : resolve(pathArgument);
 
+        // 路径不存在时说清楚，别把 NoSuchFileException 原样甩给模型
+        if (!Files.exists(start)) {
+            throw new IllegalArgumentException(
+                    "路径不存在：" + pathArgument
+                            + "（path 是相对仓库根目录的；多模块仓库的根目录下通常没有 src/main，"
+                            + "可以先不带 path 搜一次，看文件到底在哪）");
+        }
+
         if (Files.isRegularFile(start)) {
             files.add(start);
             return files;
