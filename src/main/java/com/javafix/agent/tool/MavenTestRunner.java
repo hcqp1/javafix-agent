@@ -27,7 +27,29 @@ public class MavenTestRunner implements TestRunner {
      * 被误判成超时——**那种失败和被测的 Bug 毫无关系，却会污染整份评测结果**，
      * 正是我们最不想要的假失败。小项目可以自己传更短的超时。
      */
-    private static final Duration DEFAULT_TIMEOUT = Duration.ofMinutes(15);
+    private static final Duration DEFAULT_TIMEOUT = timeoutFromEnvironment();
+
+    /**
+     * 超时可以从环境变量调，免得为了改一个数字重新编译。
+     *
+     * <p>默认 30 分钟是拿真实仓库量出来的：RocketMQ 的 store 模块连同依赖模块一起跑全量测试
+     * 要十五分钟以上（多模块构建 + 字节码增强 + 测试本身）。之前设 15 分钟时，
+     * 基线测试正好被掐断，那一整轮就白跑了。
+     */
+    private static Duration timeoutFromEnvironment() {
+
+        String configured = System.getenv("JAVAFIX_TEST_TIMEOUT_MINUTES");
+
+        if (configured == null || configured.isBlank()) {
+            return Duration.ofMinutes(30);
+        }
+
+        try {
+            return Duration.ofMinutes(Long.parseLong(configured.strip()));
+        } catch (NumberFormatException e) {
+            return Duration.ofMinutes(30);
+        }
+    }
 
     /** 日志相对目标项目根目录的位置，超时或失败之后仍可回看。 */
     private static final String LOG_FILE = "target/javafix-mvn-test.log";
@@ -69,8 +91,10 @@ public class MavenTestRunner implements TestRunner {
                 return new TestResult(
                         TestResult.EXIT_TIMEOUT,
                         result.output(),
-                        "mvn test timed out after " + timeout.toMillis()
-                                + " ms and was terminated: " + projectPath
+                        "mvn test 超过 " + timeout.toMinutes() + " 分钟仍未结束，已经终止。"
+                                + "如果是整个模块一起跑太慢，用 run_tests 的 test 参数"
+                                + "只跑相关的测试类（例如 test=SomeTest）；也可以缩小范围再试。"
+                                + "项目路径：" + projectPath
                 );
             }
 

@@ -40,7 +40,8 @@ public class ReadFileTool extends ProjectTool {
         Path file = resolve(arguments.get("path"));
 
         if (!Files.isRegularFile(file)) {
-            throw new IllegalArgumentException("not a file: " + arguments.get("path"));
+            throw new IllegalArgumentException(
+                    "不是文件（可能不存在）：" + arguments.get("path") + "，请先用 search_code 确认路径");
         }
 
         try {

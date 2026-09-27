@@ -322,9 +322,17 @@ public class AgentLoop {
         return report(symptom, phase, lastSummary);
     }
 
-    /** 观察结果看起来是"全部通过"：有通过行，且没有任何失败行。 */
+    /**
+     * 观察结果看起来是"全部通过"：必须是以"测试通过"开头的成功结果、有通过行、且没有任何失败行。
+     *
+     * <p>为什么要卡第一句：超时的运行会带回一段"目前看起来都在通过"的日志，如果不加这道判断，
+     * 一次没跑完的测试会被当成"验证通过"。
+     */
     private static boolean looksPassing(String observation) {
-        return PASSING_TEST.matcher(observation).find() && !FAILING_TEST.matcher(observation).find();
+        return observation != null
+                && observation.startsWith("测试通过")
+                && PASSING_TEST.matcher(observation).find()
+                && !FAILING_TEST.matcher(observation).find();
     }
 
     private void emit(String line) {

@@ -56,8 +56,8 @@ class MavenTestRunnerTest {
         assertFalse(result.isSuccess());
         assertEquals(TestResult.EXIT_TIMEOUT, result.getExitCode());
         assertTrue(
-                result.getStderr().contains("timed out"),
-                "超时要给出可识别的原因，实际：" + result.getStderr()
+                result.getStderr().contains("超过") && result.getStderr().contains("test"),
+                "超时既要给出可识别的原因，也要顺带告诉模型可以收窄测试范围，实际：" + result.getStderr()
         );
         assertNotNull(result.getStdout(), "即使超时，也要返回已经产生的输出");
     }
