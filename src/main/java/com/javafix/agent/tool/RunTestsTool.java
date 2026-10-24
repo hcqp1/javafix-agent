@@ -5,7 +5,6 @@ import com.javafix.agent.core.TestRunner;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
@@ -25,6 +24,7 @@ public class RunTestsTool extends ProjectTool {
     private static final int MAX_SUMMARY_CHARS = 3400;
     private static final int MAX_LINE_CHARS = 250;
     private static final int MAX_STDERR_CHARS = 400;
+    private static final int MAX_FAILURE_CASES = 2;
 
     private static final Pattern FAILED_COUNT = Pattern.compile("Failures: [1-9]|Errors: [1-9]");
     private static final Pattern PASSING_COUNT =
@@ -35,6 +35,17 @@ public class RunTestsTool extends ProjectTool {
             "^\\s*(?:\\[ERROR\\]\\s*)?at\\s+([\\w.$]+)\\([^)]*\\.java:\\d+\\)");
 
     private final TestRunner testRunner;
+
+    private static final class FailureCase {
+        final String header;
+        final List<String> details = new ArrayList<>();
+        final List<String> projectFrames = new ArrayList<>();
+        final List<String> frameworkFrames = new ArrayList<>();
+
+        FailureCase(String header) {
+            this.header = header;
+        }
+    }
 
     public RunTestsTool(TestRunner testRunner, Path root) {
         super(root);
@@ -92,11 +103,18 @@ public class RunTestsTool extends ProjectTool {
         List<String> zeroCounts = new ArrayList<>();
         List<String> buildResults = new ArrayList<>();
         List<String> otherErrors = new ArrayList<>();
+        List<FailureCase> failureCases = new ArrayList<>();
+        FailureCase currentCase = null;
+        boolean inCase = false;
+        int caseCount = 0;
+        int relevantLines = 0;
 
         for (String line : log.lines().toList()) {
             String shown = shorten(line.strip(), MAX_LINE_CHARS);
-            Matcher frame = STACK_FRAME.matcher(line);
             if (line.contains("Tests run:")) {
+                relevantLines++;
+                inCase = false;
+                currentCase = null;
                 if (FAILED_COUNT.matcher(line).find()) {
                     failedCounts.add(shown);
                 } else if (PASSING_COUNT.matcher(line).find()) {
@@ -104,22 +122,81 @@ public class RunTestsTool extends ProjectTool {
                 } else {
                     zeroCounts.add(shown);
                 }
-            } else if (FAILURE_DETAIL.matcher(line).find()) {
-                details.add(shown);
-            } else if (frame.find()) {
-                (isFrameworkFrame(frame.group(1)) ? frameworkFrames : projectFrames).add(shown);
-            } else if (line.contains("BUILD SUCCESS") || line.contains("BUILD FAILURE")) {
+                continue;
+            }
+            if (line.contains("BUILD SUCCESS") || line.contains("BUILD FAILURE")) {
+                relevantLines++;
+                inCase = false;
+                currentCase = null;
                 buildResults.add(shown);
+                continue;
+            }
+            if (line.contains("<<< FAILURE!") || line.contains("<<< ERROR!")) {
+                relevantLines++;
+                inCase = true;
+                caseCount++;
+                currentCase = null;
+                if (failureCases.size() < MAX_FAILURE_CASES) {
+                    currentCase = new FailureCase(shorten(
+                            line.strip().replaceFirst("^\\[ERROR\\]\\s*", ""), MAX_LINE_CHARS));
+                    failureCases.add(currentCase);
+                }
+                continue;
+            }
+            Matcher frame = STACK_FRAME.matcher(line);
+            boolean isFrame = frame.find();
+            if (inCase) {
+                boolean isDetail = FAILURE_DETAIL.matcher(line).find();
+                if (isDetail || isFrame) {
+                    relevantLines++;
+                }
+                if (currentCase != null) {
+                    if (isDetail && currentCase.details.size() < 2) {
+                        currentCase.details.add(shown);
+                    } else if (isFrame) {
+                        List<String> frames = isFrameworkFrame(frame.group(1))
+                                ? currentCase.frameworkFrames : currentCase.projectFrames;
+                        if (frames.size() < 2) {
+                            frames.add(shown);
+                        }
+                    }
+                }
+                continue;
+            }
+            if (FAILURE_DETAIL.matcher(line).find()) {
+                relevantLines++;
+                details.add(shown);
+            } else if (isFrame) {
+                relevantLines++;
+                (isFrameworkFrame(frame.group(1)) ? frameworkFrames : projectFrames).add(shown);
             } else if (line.contains("[ERROR]")) {
+                relevantLines++;
                 otherErrors.add(shown);
             }
         }
 
-        LinkedHashSet<String> selected = new LinkedHashSet<>();
-        addFirst(selected, failedCounts, 4);
+        List<String> selected = new ArrayList<>();
+        addFirst(selected, failedCounts, failureCases.isEmpty() ? 4 : 1);
+        if (!failureCases.isEmpty() && !buildResults.isEmpty()) {
+            selected.add(buildResults.get(buildResults.size() - 1));
+        }
+        for (int i = 0; i < failureCases.size(); i++) {
+            FailureCase failed = failureCases.get(i);
+            selected.add(shorten("失败用例 " + (i + 1) + "/" + caseCount + ": " + failed.header,
+                    MAX_LINE_CHARS));
+            addFirst(selected, failed.details, 2);
+            addFirst(selected, failed.projectFrames.isEmpty()
+                    ? failed.frameworkFrames : failed.projectFrames, 2);
+        }
+        if (caseCount > failureCases.size()) {
+            selected.add("另有 " + (caseCount - failureCases.size()) + " 个失败用例未展示，完整日志见 target/javafix-mvn-test.log");
+        }
+        if (!failureCases.isEmpty()) {
+            addFirst(selected, failedCounts.subList(Math.min(1, failedCounts.size()), failedCounts.size()), 3);
+        }
         addFirst(selected, passingCounts, 2);
         addFirst(selected, zeroCounts, 1);
-        if (!buildResults.isEmpty()) {
+        if (failureCases.isEmpty() && !buildResults.isEmpty()) {
             selected.add(buildResults.get(buildResults.size() - 1));
         }
         addFirst(selected, details, 4);
@@ -136,9 +213,8 @@ public class RunTestsTool extends ProjectTool {
 
         StringBuilder summary = new StringBuilder();
         int lines = 0;
-        boolean omitted = failedCounts.size() + passingCounts.size() + zeroCounts.size()
-                + buildResults.size() + details.size() + projectFrames.size()
-                + frameworkFrames.size() + otherErrors.size() > selected.size();
+        int syntheticLines = caseCount > failureCases.size() ? 1 : 0;
+        boolean omitted = relevantLines > selected.size() - syntheticLines;
         for (String line : selected) {
             if (lines >= MAX_LINES - 1 || summary.length() + line.length() + 1 > MAX_SUMMARY_CHARS - 60) {
                 omitted = true;
@@ -155,7 +231,7 @@ public class RunTestsTool extends ProjectTool {
         return summary.toString();
     }
 
-    private static void addFirst(LinkedHashSet<String> selected, List<String> lines, int limit) {
+    private static void addFirst(List<String> selected, List<String> lines, int limit) {
         selected.addAll(lines.subList(0, Math.min(limit, lines.size())));
     }
 

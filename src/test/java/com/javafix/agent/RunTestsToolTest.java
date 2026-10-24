@@ -74,6 +74,58 @@ class RunTestsToolTest {
     }
 
     @Test
+    void shouldKeepEachFailureWithItsOwnCauseAndStackFrame() {
+        String log = """
+                [ERROR] com.example.AlphaTest.first <<< FAILURE!
+                org.opentest4j.AssertionFailedError: alpha expected 1
+                    at com.example.Alpha.check(Alpha.java:11)
+                [ERROR] com.example.BetaTest.second <<< ERROR!
+                java.lang.IllegalStateException: beta crashed
+                    at com.example.Beta.check(Beta.java:22)
+                [ERROR] com.example.GammaTest.third <<< FAILURE!
+                org.opentest4j.AssertionFailedError: gamma expected 3
+                    at com.example.Gamma.check(Gamma.java:33)
+                [ERROR] Tests run: 3, Failures: 3, Errors: 0, Skipped: 0
+                [ERROR] BUILD FAILURE
+                """;
+        RunTestsTool tool = new RunTestsTool(path -> new TestResult(1, log, ""), project);
+
+        String observation = tool.execute(Map.of());
+
+        int first = observation.indexOf("失败用例 1/3: com.example.AlphaTest.first");
+        int firstCause = observation.indexOf("alpha expected 1");
+        int firstFrame = observation.indexOf("Alpha.java:11");
+        int second = observation.indexOf("失败用例 2/3: com.example.BetaTest.second");
+        int secondCause = observation.indexOf("beta crashed");
+        int secondFrame = observation.indexOf("Beta.java:22");
+        assertTrue(first >= 0 && first < firstCause && firstCause < firstFrame
+                && firstFrame < second && second < secondCause && secondCause < secondFrame, observation);
+        assertTrue(observation.contains("另有 1 个失败用例未展示"), observation);
+        assertFalse(observation.contains("GammaTest.third"), observation);
+        assertTrue(observation.contains("Tests run: 3, Failures: 3"), observation);
+        assertTrue(observation.length() < 4000, observation);
+    }
+
+    @Test
+    void shouldMarkOmittedDiagnosticsWhenFailureCasesAreGrouped() {
+        StringBuilder log = new StringBuilder();
+        for (int i = 0; i < 9; i++) {
+            log.append("[ERROR] plugin noise ").append(i).append('\n');
+        }
+        log.append("[ERROR] com.example.AlphaTest.first <<< FAILURE!\n")
+                .append("org.opentest4j.AssertionFailedError: expected 1\n")
+                .append("    at com.example.Alpha.check(Alpha.java:11)\n")
+                .append("[ERROR] Tests run: 1, Failures: 1, Errors: 0\n")
+                .append("[ERROR] BUILD FAILURE\n");
+        RunTestsTool tool = new RunTestsTool(path -> new TestResult(1, log.toString(), ""), project);
+
+        String observation = tool.execute(Map.of());
+
+        assertFalse(observation.contains("plugin noise 8"), observation);
+        assertTrue(observation.contains("摘要已截断"), observation);
+    }
+
+    @Test
     void shouldKeepSuccessfulTestSummary() {
         RunTestsTool tool = new RunTestsTool(path -> new TestResult(0,
                 "Tests run: 3, Failures: 0, Errors: 0, Skipped: 0\nBUILD SUCCESS", ""), project);
@@ -122,6 +174,7 @@ class RunTestsToolTest {
 
         String observation = tool.execute(Map.of("test", "CalculatorTest"));
 
+        assertTrue(observation.contains("失败用例 1/"), observation);
         assertTrue(observation.contains("CalculatorTest.java:"), observation);
     }
 }
