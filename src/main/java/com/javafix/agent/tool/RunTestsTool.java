@@ -7,6 +7,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -14,24 +15,37 @@ import java.util.regex.Pattern;
  *
  * <p>测试结果是这个项目里最重要的反馈信号：它决定 Agent 下一步改哪里。
  *
- * <p>V0 先把完整构建输出原样交给模型。等接了真模型、能观察到真实任务里的输出之后，
- * 再在这里做两件还没定的事：把日志提炼成摘要（完整日志已经落盘到 target 下），
- * 以及区分「编译失败」和「测试失败」——这两种情况的修复策略完全不同。
+ * <p>把失败和调用栈优先整理成有界摘要；完整日志由执行器留在 target 下。
  */
 public class RunTestsTool extends ProjectTool {
 
-    /** 摘要里最多保留多少行。 */
+    /** 模型只看有界诊断视图；完整 Maven 日志仍保存在 target 下。 */
     private static final int MAX_LINES = 40;
+    private static final int MAX_SUMMARY_CHARS = 3400;
+    private static final int MAX_LINE_CHARS = 250;
+    private static final int MAX_STDERR_CHARS = 400;
+    private static final int MAX_FAILURE_CASES = 2;
 
-    /**
-     * 从完整日志里挑出对修复有用的行：测试汇总、构建结果、编译错误、断言信息、异常链。
-     * 其余大部分是插件下载与生命周期输出，对定位问题没有帮助。
-     */
-    private static final Pattern IMPORTANT = Pattern.compile(
-            "Tests run:|BUILD SUCCESS|BUILD FAILURE|\\[ERROR\\]|expected:|Caused by:|AssertionFailed|COMPILATION ERROR"
-    );
+    private static final Pattern FAILED_COUNT = Pattern.compile("Failures: [1-9]|Errors: [1-9]");
+    private static final Pattern PASSING_COUNT =
+            Pattern.compile("Tests run: [1-9][0-9]*, Failures: 0, Errors: 0");
+    private static final Pattern FAILURE_DETAIL = Pattern.compile(
+            "<<< (?:FAILURE|ERROR)!|AssertionFailed|expected:|Caused by:|COMPILATION ERROR|(?:Exception|Error):");
+    private static final Pattern STACK_FRAME = Pattern.compile(
+            "^\\s*(?:\\[ERROR\\]\\s*)?at\\s+([\\w.$]+)\\([^)]*\\.java:\\d+\\)");
 
     private final TestRunner testRunner;
+
+    private static final class FailureCase {
+        final String header;
+        final List<String> details = new ArrayList<>();
+        final List<String> projectFrames = new ArrayList<>();
+        final List<String> frameworkFrames = new ArrayList<>();
+
+        FailureCase(String header) {
+            this.header = header;
+        }
+    }
 
     public RunTestsTool(TestRunner testRunner, Path root) {
         super(root);
@@ -64,6 +78,8 @@ public class RunTestsTool extends ProjectTool {
         } else if (result.getExitCode() == TestResult.EXIT_TIMEOUT) {
             // 超时和"跑完了但失败"是两回事：前者根本没有结论，不能当成失败证据
             observation.append("测试超时，没有跑完。");
+        } else if (result.getExitCode() == TestResult.EXIT_START_FAILURE) {
+            observation.append("测试未启动，没有拿到测试结果。");
         } else {
             observation.append("测试未通过。");
         }
@@ -71,38 +87,161 @@ public class RunTestsTool extends ProjectTool {
         observation.append(summarize(result.getStdout()));
 
         if (result.getStderr() != null && !result.getStderr().isBlank()) {
-            observation.append("\n").append(result.getStderr());
+            observation.append("\n").append(shorten(result.getStderr().strip(), MAX_STDERR_CHARS));
         }
 
         return observation.toString();
     }
 
-    /**
-     * 把完整日志提炼成摘要。
-     *
-     * <p>之前这里是把整份 `mvn test` 输出原样交给模型。实测下来，一个只有 8 行的项目，
-     * 一次构建输出就有四十多行，大半是插件日志；真实项目的日志动辄几百上千行，
-     * 光这一项就能吃掉半个上下文窗口。完整日志仍然落在 target 下，需要时可以自己去看。
-     */
+    /** 失败摘要和项目调用栈先于插件噪声，避免固定行数截断时丢掉定位证据。 */
     private String summarize(String log) {
-
-        List<String> kept = new ArrayList<>();
+        List<String> failedCounts = new ArrayList<>();
+        List<String> details = new ArrayList<>();
+        List<String> projectFrames = new ArrayList<>();
+        List<String> frameworkFrames = new ArrayList<>();
+        List<String> passingCounts = new ArrayList<>();
+        List<String> zeroCounts = new ArrayList<>();
+        List<String> buildResults = new ArrayList<>();
+        List<String> otherErrors = new ArrayList<>();
+        List<FailureCase> failureCases = new ArrayList<>();
+        FailureCase currentCase = null;
+        boolean inCase = false;
+        int caseCount = 0;
+        int relevantLines = 0;
 
         for (String line : log.lines().toList()) {
-            if (IMPORTANT.matcher(line).find()) {
-                kept.add(line.strip());
-                if (kept.size() >= MAX_LINES) {
-                    kept.add("（摘要已截断，完整日志见 target/javafix-mvn-test.log）");
-                    break;
+            String shown = shorten(line.strip(), MAX_LINE_CHARS);
+            if (line.contains("Tests run:")) {
+                relevantLines++;
+                inCase = false;
+                currentCase = null;
+                if (FAILED_COUNT.matcher(line).find()) {
+                    failedCounts.add(shown);
+                } else if (PASSING_COUNT.matcher(line).find()) {
+                    passingCounts.add(shown);
+                } else {
+                    zeroCounts.add(shown);
                 }
+                continue;
+            }
+            if (line.contains("BUILD SUCCESS") || line.contains("BUILD FAILURE")) {
+                relevantLines++;
+                inCase = false;
+                currentCase = null;
+                buildResults.add(shown);
+                continue;
+            }
+            if (line.contains("<<< FAILURE!") || line.contains("<<< ERROR!")) {
+                relevantLines++;
+                inCase = true;
+                caseCount++;
+                currentCase = null;
+                if (failureCases.size() < MAX_FAILURE_CASES) {
+                    currentCase = new FailureCase(shorten(
+                            line.strip().replaceFirst("^\\[ERROR\\]\\s*", ""), MAX_LINE_CHARS));
+                    failureCases.add(currentCase);
+                }
+                continue;
+            }
+            Matcher frame = STACK_FRAME.matcher(line);
+            boolean isFrame = frame.find();
+            if (inCase) {
+                boolean isDetail = FAILURE_DETAIL.matcher(line).find();
+                if (isDetail || isFrame) {
+                    relevantLines++;
+                }
+                if (currentCase != null) {
+                    if (isDetail && currentCase.details.size() < 2) {
+                        currentCase.details.add(shown);
+                    } else if (isFrame) {
+                        List<String> frames = isFrameworkFrame(frame.group(1))
+                                ? currentCase.frameworkFrames : currentCase.projectFrames;
+                        if (frames.size() < 2) {
+                            frames.add(shown);
+                        }
+                    }
+                }
+                continue;
+            }
+            if (FAILURE_DETAIL.matcher(line).find()) {
+                relevantLines++;
+                details.add(shown);
+            } else if (isFrame) {
+                relevantLines++;
+                (isFrameworkFrame(frame.group(1)) ? frameworkFrames : projectFrames).add(shown);
+            } else if (line.contains("[ERROR]")) {
+                relevantLines++;
+                otherErrors.add(shown);
             }
         }
 
-        if (kept.isEmpty()) {
-            // 摘要为空时不能说成"没有输出"，那会让模型误以为构建根本没跑
+        List<String> selected = new ArrayList<>();
+        addFirst(selected, failedCounts, failureCases.isEmpty() ? 4 : 1);
+        if (!failureCases.isEmpty() && !buildResults.isEmpty()) {
+            selected.add(buildResults.get(buildResults.size() - 1));
+        }
+        for (int i = 0; i < failureCases.size(); i++) {
+            FailureCase failed = failureCases.get(i);
+            selected.add(shorten("失败用例 " + (i + 1) + "/" + caseCount + ": " + failed.header,
+                    MAX_LINE_CHARS));
+            addFirst(selected, failed.details, 2);
+            addFirst(selected, failed.projectFrames.isEmpty()
+                    ? failed.frameworkFrames : failed.projectFrames, 2);
+        }
+        if (caseCount > failureCases.size()) {
+            selected.add("另有 " + (caseCount - failureCases.size()) + " 个失败用例未展示，完整日志见 target/javafix-mvn-test.log");
+        }
+        if (!failureCases.isEmpty()) {
+            addFirst(selected, failedCounts.subList(Math.min(1, failedCounts.size()), failedCounts.size()), 3);
+        }
+        addFirst(selected, passingCounts, 2);
+        addFirst(selected, zeroCounts, 1);
+        if (failureCases.isEmpty() && !buildResults.isEmpty()) {
+            selected.add(buildResults.get(buildResults.size() - 1));
+        }
+        addFirst(selected, details, 4);
+        addFirst(selected, projectFrames, 8);
+        if (projectFrames.isEmpty()) {
+            addFirst(selected, frameworkFrames, 2);
+        }
+        selected.addAll(details.subList(Math.min(4, details.size()), Math.min(10, details.size())));
+        addFirst(selected, otherErrors, 8);
+
+        if (selected.isEmpty()) {
             return "（日志里没有可提炼的关键行，完整日志见 target/javafix-mvn-test.log）";
         }
 
-        return String.join("\n", kept);
+        StringBuilder summary = new StringBuilder();
+        int lines = 0;
+        int syntheticLines = caseCount > failureCases.size() ? 1 : 0;
+        boolean omitted = relevantLines > selected.size() - syntheticLines;
+        for (String line : selected) {
+            if (lines >= MAX_LINES - 1 || summary.length() + line.length() + 1 > MAX_SUMMARY_CHARS - 60) {
+                omitted = true;
+                break;
+            }
+            if (lines++ > 0) {
+                summary.append('\n');
+            }
+            summary.append(line);
+        }
+        if (omitted) {
+            summary.append("\n（摘要已截断，完整日志见 target/javafix-mvn-test.log）");
+        }
+        return summary.toString();
+    }
+
+    private static void addFirst(List<String> selected, List<String> lines, int limit) {
+        selected.addAll(lines.subList(0, Math.min(limit, lines.size())));
+    }
+
+    private static boolean isFrameworkFrame(String className) {
+        return className.startsWith("java.") || className.startsWith("jdk.")
+                || className.startsWith("org.junit.") || className.startsWith("org.opentest4j.")
+                || className.startsWith("org.apache.maven.") || className.startsWith("org.apache.surefire.");
+    }
+
+    private static String shorten(String value, int maxChars) {
+        return value.length() <= maxChars ? value : value.substring(0, maxChars) + "…";
     }
 }

@@ -4,11 +4,23 @@ import com.javafix.agent.llm.LlmClient;
 import com.javafix.agent.tool.Tool;
 import com.javafix.agent.tool.WorkspaceStatus;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.FileVisitResult;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HexFormat;
 import java.util.List;
+import java.util.Objects;
 import java.util.function.Consumer;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -42,13 +54,16 @@ public class AgentLoop {
     /** 验证失败最多退回修复几轮，防止"改—验—再改"无限循环。 */
     private static final int MAX_FIX_ROUNDS = 3;
 
+    private static final int MAX_FAILED_ATTEMPTS = 2;
+
     /** 一条测试失败，用于判定"复现"阶段完成。 */
     private static final Pattern FAILING_TEST =
             Pattern.compile("Tests run:.*(Failures: [1-9]|Errors: [1-9])");
 
     /** 一条测试通过，用于判定"验证"阶段完成。 */
     private static final Pattern PASSING_TEST =
-            Pattern.compile("Tests run:.*(Failures: 0, Errors: 0)");
+            Pattern.compile("Tests run: [1-9][0-9]*, Failures: 0, Errors: 0");
+    private static final Pattern TEST_COUNT = Pattern.compile("Tests run: ([0-9]+),");
 
     private static final String ACTION_FORMAT = """
 
@@ -70,8 +85,16 @@ public class AgentLoop {
     private final int maxSteps;
     private final List<String> transcript = new ArrayList<>();
 
+    private record FailedAttempt(int round, String plan, String testScope, String feedback) {
+        String summary() {
+            return "第 " + round + " 轮：方案「" + plan + "」；测试范围 " + testScope + "；结果：" + feedback;
+        }
+    }
+
     /** 进度回调：每一步都会回一行简短描述，供命令行实时显示。默认什么也不做。 */
     private Consumer<String> progress = line -> {
+    };
+    private Consumer<String> recordListener = entry -> {
     };
 
     public AgentLoop(LlmClient llmClient, List<Tool> tools) {
@@ -104,6 +127,13 @@ public class AgentLoop {
         return this;
     }
 
+    /** 每条已完成的轨迹立即交给调用方保存。 */
+    public AgentLoop onRecord(Consumer<String> listener) {
+        this.recordListener = listener == null ? entry -> {
+        } : listener;
+        return this;
+    }
+
     /** 运行轨迹：每一步的阶段、动作与观察结果。 */
     public List<String> transcript() {
         return List.copyOf(transcript);
@@ -117,8 +147,14 @@ public class AgentLoop {
      */
     public String run(String symptom) {
 
+        transcript.clear();
         Phase phase = Phase.REPRODUCE;
         String lastSummary = null;
+        String lastFixSummary = null;
+        String reproducedTestScope = null;
+        String reproducedTestSources = null;
+        long reproducedTestCount = 0;
+        List<FailedAttempt> failedAttempts = new ArrayList<>();
         int phaseSteps = 0;
         int unproductiveSteps = 0;
         boolean sourceChanged = false;
@@ -126,7 +162,6 @@ public class AgentLoop {
         int fixRounds = 1;
         Phase countedPhase = null;
         int testsRunInPhase = 0;
-        boolean lastTestPassedInPhase = false;
 
         for (int step = 1; step <= maxSteps; step++) {
 
@@ -134,14 +169,14 @@ public class AgentLoop {
             if (countedPhase != phase) {
                 countedPhase = phase;
                 testsRunInPhase = 0;
-                lastTestPassedInPhase = false;
             }
 
             emit("[" + phase.label() + " " + (phaseSteps + 1) + "/" + phase.stepBudget() + "] 思考中…");
 
             String response = llmClient.complete(
                     buildPrompt(symptom, phase, lastSummary, step, phaseSteps,
-                            buildNudge(phase, phaseSteps, unproductiveSteps, sawPassingTest, sourceChanged))
+                            buildNudge(phase, phaseSteps, unproductiveSteps, sawPassingTest, sourceChanged),
+                            failedAttempts)
             );
 
             Action action;
@@ -157,57 +192,38 @@ public class AgentLoop {
 
             if (action.isFinal()) {
                 record(phase, step, "阶段结论：" + action.finalAnswer(), "");
-                lastSummary = action.finalAnswer();
-
-                // 用工作区状态判断"到底改没改代码"，而不是看 write_file 的返回文本——
-                // 模型改用 shell 编辑文件就绕过去了，真实运行里发生过
-                boolean codeChanged = sourceChanged || mainSourcesChangedNow();
 
                 if (phase == Phase.VERIFY) {
-                    // 一次测试都没跑就说验证完成——这是最常见的"假完成"，直接拒绝
                     if (testsRunInPhase == 0) {
                         emit("验证阶段一次测试都没跑，不许结束");
                         record(phase, step, "（验证阶段未跑测试）",
                                 "验证阶段还没有运行过任何测试，无法确认修复是否有效。"
                                         + "下一步必须用 run_tests 跑一次相关的测试。");
-                        phaseSteps++;
-                        continue;
+                    } else {
+                        record(phase, step, "（验证没有有效测试结论）",
+                                "尚未通过复现时使用的测试范围，不能宣布修复完成。下一步用 run_tests 重新验证。");
                     }
-
-                    if (!lastTestPassedInPhase && fixRounds < MAX_FIX_ROUNDS) {
-                        fixRounds++;
-                        emit("验证不通过，退回修复阶段（第 " + fixRounds + " 轮）");
-                        record(phase, step, "（验证退回）", "验证阶段的测试没有全绿，退回修复阶段继续改。");
-                        phase = Phase.FIX;
-                        phaseSteps = 0;
-                        unproductiveSteps = 0;
-                        continue;
-                    }
-
-                    // 验证阶段发现"什么都没改"，说明修复阶段是空转的，退回重做
-                    if (!codeChanged && fixRounds < MAX_FIX_ROUNDS) {
-                        fixRounds++;
-                        emit("没有任何代码改动，退回修复阶段（第 " + fixRounds + " 轮）");
-                        record(phase, step, "（验证退回）",
-                                "仓库里没有任何代码改动，说明修复阶段没有产出，退回修复阶段重做。");
-                        phase = Phase.FIX;
-                        phaseSteps = 0;
-                        unproductiveSteps = 0;
-                        continue;
-                    }
-                    emit("验证阶段结束，任务完成");
-                    return lastSummary;
+                    phaseSteps++;
+                    continue;
                 }
+
+                lastSummary = action.finalAnswer();
+                // 用工作区状态判断"到底改没改代码"，而不是看 write_file 的返回文本——
+                // 模型改用 shell 编辑文件就绕过去了，真实运行里发生过
+                boolean codeChanged = sourceChanged || mainSourcesChangedNow();
 
                 // 修复阶段不许空手离开：阶段出口由代码判定，不交给模型自觉
                 if (phase == Phase.FIX && !codeChanged && phaseSteps < phase.stepBudget()) {
                     emit("修复阶段还没改任何文件，不许离开这一阶段");
                     record(phase, step, "（修复阶段未产出）",
                             "修复阶段到目前为止没有改动任何文件——只在代码里查找不算完成修复。"
-                                    + "下一步必须用 write_file 落地一个最小改动（用 shell 改文件不算，"
-                                    + "那种改动不会被流程认可）。");
+                                    + "修改现有文件用 replace_in_file，新建文件用 write_file；不要用 shell 改文件。");
                     phaseSteps++;
                     continue;
+                }
+
+                if (phase == Phase.FIX) {
+                    lastFixSummary = action.finalAnswer();
                 }
 
                 Phase next = phase.next();
@@ -218,8 +234,8 @@ public class AgentLoop {
                 continue;
             }
 
-            // 复现阶段禁止改生产代码——这条靠代码强制，而不是靠提示词请求模型配合
-            if (phase == Phase.REPRODUCE && isMainSourceWrite(action)) {
+            // 复现阶段拦截文件编辑工具对生产代码的修改
+            if (phase == Phase.REPRODUCE && isMainSourceEdit(action)) {
                 record(
                         phase,
                         step,
@@ -261,24 +277,29 @@ public class AgentLoop {
             record(phase, step, describe(action), observation);
             phaseSteps++;
 
-            boolean wroteFile = "write_file".equals(action.toolName()) && observation.startsWith("已写入 ");
+            boolean editedFile = ("write_file".equals(action.toolName()) && observation.startsWith("已写入 "))
+                    || ("replace_in_file".equals(action.toolName()) && observation.startsWith("已替换 "));
             boolean ranTests = "run_tests".equals(action.toolName());
 
-            if (wroteFile) {
+            if (editedFile) {
                 sourceChanged = true;
             }
             if (ranTests) {
                 testsRunInPhase++;
-                lastTestPassedInPhase = looksPassing(observation);
-                if (lastTestPassedInPhase) {
+                if (looksPassing(observation)) {
                     sawPassingTest = true;
                 }
             }
 
             // "产出"指的是写文件或跑测试；只是搜索、读文件不算——那样可以永远探索下去
-            unproductiveSteps = (wroteFile || ranTests) ? 0 : unproductiveSteps + 1;
+            unproductiveSteps = (editedFile || ranTests) ? 0 : unproductiveSteps + 1;
 
-            if (phase == Phase.REPRODUCE && FAILING_TEST.matcher(observation).find()) {
+            if (phase == Phase.REPRODUCE && ranTests
+                    && observation.startsWith("测试未通过。")
+                    && FAILING_TEST.matcher(observation).find()) {
+                reproducedTestScope = action.arguments().getOrDefault("test", "").strip();
+                reproducedTestSources = testSourcesFingerprint();
+                reproducedTestCount = countTests(observation);
                 lastSummary = "已复现一条失败测试";
                 emit("阶段推进：复现 → 定位（已经有一条失败的测试了）");
                 phase = Phase.LOCALIZE;
@@ -287,16 +308,49 @@ public class AgentLoop {
                 continue;
             }
 
-            if (phase == Phase.VERIFY && looksPassing(observation)) {
-                return lastSummary == null ? "验证通过" : lastSummary;
-            }
-
-            // 验证阶段跑出失败：说明修得不彻底，退回修复阶段
-            if (phase == Phase.VERIFY && FAILING_TEST.matcher(observation).find() && fixRounds < MAX_FIX_ROUNDS) {
+            if (phase == Phase.VERIFY && ranTests) {
+                String verifiedTestScope = action.arguments().getOrDefault("test", "").strip();
+                if (!Objects.equals(reproducedTestScope, verifiedTestScope)) {
+                    record(phase, step, "（验证范围不符）",
+                            "本次测试范围与复现时不一致，不能用来判断原缺陷是否修复。"
+                                    + "请用 run_tests 重新运行复现时的测试范围。");
+                    continue;
+                }
+                if (looksPassing(observation)) {
+                    if (reproducedTestSources == null
+                            || !reproducedTestSources.equals(testSourcesFingerprint())
+                            || countTests(observation) < reproducedTestCount) {
+                        record(phase, step, "（验证结果不充分）",
+                                "复现测试源码发生变化、执行用例数量减少，或无法核对测试源码。"
+                                        + "请恢复复现测试后重新验证。");
+                        continue;
+                    }
+                    return lastSummary == null ? "验证通过" : lastSummary;
+                }
+                boolean failedTestOrCompilation = FAILING_TEST.matcher(observation).find()
+                        || observation.contains("COMPILATION ERROR");
+                if (!observation.startsWith("测试未通过。") || !failedTestOrCompilation) {
+                    record(phase, step, "（验证结果不充分）",
+                            "测试没有得到有效的失败或通过结论。请用 run_tests 重新运行复现时的测试范围。");
+                    continue;
+                }
+                FailedAttempt attempt = new FailedAttempt(fixRounds,
+                        lastFixSummary == null ? "未说明修复方案" : lastFixSummary,
+                        action.arguments().getOrDefault("test", "全部测试"),
+                        trimFailure(observation));
+                if (failedAttempts.size() == MAX_FAILED_ATTEMPTS) {
+                    failedAttempts.remove(0);
+                }
+                failedAttempts.add(attempt);
+                record(phase, step, "（失败尝试）", attempt.summary());
+                if (fixRounds >= MAX_FIX_ROUNDS) {
+                    return failedVerificationReport(failedAttempts);
+                }
                 fixRounds++;
                 emit("验证不通过，退回修复阶段（第 " + fixRounds + " 轮）");
-                record(phase, step, "（验证退回）", "验证阶段跑出失败测试，退回修复阶段继续改。");
+                record(phase, step, "（验证退回）", "验证阶段测试未通过，退回修复阶段继续改。");
                 phase = Phase.FIX;
+                lastFixSummary = null;
                 phaseSteps = 0;
                 unproductiveSteps = 0;
                 continue;
@@ -333,6 +387,60 @@ public class AgentLoop {
                 && observation.startsWith("测试通过")
                 && PASSING_TEST.matcher(observation).find()
                 && !FAILING_TEST.matcher(observation).find();
+    }
+
+    private static long countTests(String observation) {
+        Matcher counts = TEST_COUNT.matcher(observation);
+        long largest = 0;
+        while (counts.find()) {
+            largest = Math.max(largest, Long.parseLong(counts.group(1)));
+        }
+        return largest;
+    }
+
+    /** 锁定复现后 Java 测试源码，避免删掉失败用例后把其他测试通过误报为修复成功。 */
+    private String testSourcesFingerprint() {
+        Path root = tools.stream().map(Tool::projectRoot)
+                .flatMap(java.util.Optional::stream).findFirst().orElse(null);
+        if (root == null) {
+            return null;
+        }
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            List<Path> testFiles = new ArrayList<>();
+            Files.walkFileTree(root, new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+                    if (!dir.equals(root)) {
+                        String name = dir.getFileName().toString();
+                        if (name.equals("target") || name.equals(".git") || name.equals("node_modules")) {
+                            return FileVisitResult.SKIP_SUBTREE;
+                        }
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                    String relative = root.relativize(file).toString().replace('\\', '/');
+                    if (attrs.isRegularFile() && relative.endsWith(".java")
+                            && (relative.startsWith("src/test/java/")
+                            || relative.contains("/src/test/java/"))) {
+                        testFiles.add(file);
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+            });
+            testFiles.sort(Path::compareTo);
+            for (Path file : testFiles) {
+                digest.update(root.relativize(file).toString().getBytes(StandardCharsets.UTF_8));
+                digest.update((byte) 0);
+                digest.update(Files.readAllBytes(file));
+            }
+            return HexFormat.of().formatHex(digest.digest());
+        } catch (IOException | NoSuchAlgorithmException e) {
+            return null;
+        }
     }
 
     private void emit(String line) {
@@ -432,7 +540,7 @@ public class AgentLoop {
         }
 
         if (phase == Phase.FIX && !sourceChanged) {
-            return "修复阶段到现在还没有改动任何文件。下一步必须用 write_file 落地一个最小改动——"
+            return "修复阶段到现在还没有改动任何文件。修改现有文件用 replace_in_file，新建文件用 write_file——"
                     + "继续读代码、继续搜索都不算完成这个阶段。";
         }
 
@@ -445,7 +553,8 @@ public class AgentLoop {
             String lastSummary,
             int step,
             int phaseSteps,
-            String nudge) {
+            String nudge,
+            List<FailedAttempt> failedAttempts) {
 
         StringBuilder prompt = new StringBuilder();
 
@@ -475,6 +584,11 @@ public class AgentLoop {
             prompt.append("\n上一阶段的结论：").append(lastSummary).append('\n');
         }
 
+        if (!failedAttempts.isEmpty()) {
+            prompt.append("\n失败尝试（先分析未通过的原因，再提出不同的修复方案）：\n");
+            failedAttempts.forEach(attempt -> prompt.append("- ").append(attempt.summary()).append('\n'));
+        }
+
         if (!transcript.isEmpty()) {
             prompt.append("\n到目前为止的进展：\n");
             transcript.forEach(entry -> prompt.append(entry).append('\n'));
@@ -483,13 +597,26 @@ public class AgentLoop {
         return prompt.toString();
     }
 
+    private static String trimFailure(String observation) {
+        if (observation == null) {
+            return "没有测试输出";
+        }
+        String normalized = observation.replace('\n', ' ').replace('\r', ' ').strip();
+        return normalized.length() <= 800 ? normalized : normalized.substring(0, 800) + "…";
+    }
+
+    private static String failedVerificationReport(List<FailedAttempt> failedAttempts) {
+        String latest = failedAttempts.isEmpty() ? "没有通过的测试结果" : failedAttempts.get(failedAttempts.size() - 1).summary();
+        return "没能完成这个任务。达到修复轮数上限后，验证仍未通过。\n" + latest;
+    }
+
     /**
-     * 判断一个 write_file 动作是不是想改生产代码。
+     * 判断文件编辑动作是不是想改生产代码。
      * 复现阶段只允许在 src/test 下写复现测试。
      */
-    private static boolean isMainSourceWrite(Action action) {
+    private static boolean isMainSourceEdit(Action action) {
 
-        if (!"write_file".equals(action.toolName())) {
+        if (!"write_file".equals(action.toolName()) && !"replace_in_file".equals(action.toolName())) {
             return false;
         }
 
@@ -498,8 +625,13 @@ public class AgentLoop {
             return false;
         }
 
-        String normalized = path.replace('\\', '/');
-        return normalized.equals("src/main") || normalized.startsWith("src/main/");
+        try {
+            String normalized = Path.of(path.replace('\\', '/')).normalize().toString().replace('\\', '/');
+            return normalized.equals("src/main") || normalized.startsWith("src/main/")
+                    || normalized.contains("/src/main/") || normalized.endsWith("/src/main");
+        } catch (InvalidPathException e) {
+            return false; // 工具本身会把非法路径反馈给模型
+        }
     }
 
     /**
@@ -569,9 +701,11 @@ public class AgentLoop {
     }
 
     private void record(Phase phase, int step, String action, String observation) {
-        transcript.add("[" + phase.label() + "] 步骤 " + step
+        String entry = "[" + phase.label() + "] 步骤 " + step
                 + "\n" + action
-                + "\n观察：" + trim(observation));
+                + "\n观察：" + trim(observation);
+        transcript.add(entry);
+        recordListener.accept(entry);
     }
 
     /** 观察结果超长就截断，并明确告诉模型"这里被截断了，完整内容要重新读"。 */

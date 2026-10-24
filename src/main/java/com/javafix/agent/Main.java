@@ -13,10 +13,9 @@ import com.javafix.agent.tool.Tool;
 import com.javafix.agent.tool.WriteFileTool;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
@@ -66,6 +65,15 @@ public class Main {
 
         String task = String.join(" ", Arrays.copyOfRange(args, 1, args.length));
 
+        RunJournal journal;
+        try {
+            journal = RunJournal.create(
+                    Path.of(System.getProperty("user.home"), ".javafix-agent", "runs"), project, task);
+        } catch (IOException e) {
+            System.err.println("无法创建运行记录：" + e.getMessage());
+            return;
+        }
+
         LlmClient llmClient = new OpenAiCompatibleLlmClient(baseUrl, apiKey, model);
 
         List<Tool> tools = List.of(
@@ -78,6 +86,7 @@ public class Main {
         );
 
         AgentLoop loop = new AgentLoop(llmClient, tools);
+        loop.onRecord(journal::appendStep);
 
         // 实时进度：一次运行可能十几分钟，中间还夹着几分钟的 Maven 构建，
         // 不打这行日志的话，用户会以为程序卡死了。
@@ -88,14 +97,22 @@ public class Main {
         System.out.println("项目：" + project);
         System.out.println("任务：" + task);
         System.out.println("模型：" + model);
+        System.out.println("运行记录：" + journal.path());
 
         long startedAt = System.nanoTime();
+        boolean returned = false;
 
         try {
             String answer = loop.run(task);
+            returned = true;
             System.out.println("\n=== Agent 的结论 ===");
             System.out.println(answer);
         } finally {
+            try {
+                journal.finish(returned ? "returned" : "error");
+            } catch (UncheckedIOException e) {
+                System.err.println("无法保存运行结束状态：" + e.getMessage());
+            }
             long elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000;
 
             System.out.println("\n=== 本次运行的度量 ===");
@@ -107,7 +124,7 @@ public class Main {
             System.out.println("\n=== 各阶段一览 ===");
             loop.transcript().forEach(entry -> System.out.println(summarize(entry)));
 
-            System.out.println("\n完整轨迹已写入：" + writeTranscript(loop.transcript()));
+            System.out.println("\n完整轨迹已逐步写入：" + journal.path());
         }
     }
 
@@ -125,22 +142,6 @@ public class Main {
         }
 
         return head;
-    }
-
-    /** 完整轨迹写进临时文件——Agent 出错时，它是唯一的线索，但没必要刷屏。 */
-    private static Path writeTranscript(List<String> transcript) {
-        try {
-            Path file = Path.of(
-                    System.getProperty("java.io.tmpdir"),
-                    "javafix-transcript-"
-                            + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"))
-                            + ".log"
-            );
-            Files.writeString(file, String.join("\n\n", transcript), StandardCharsets.UTF_8);
-            return file;
-        } catch (IOException e) {
-            return Path.of("（写入失败：" + e.getMessage() + "）");
-        }
     }
 
     private static void usage() {

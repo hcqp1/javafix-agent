@@ -1,8 +1,11 @@
 package com.javafix.agent;
 
 import com.javafix.agent.core.AgentLoop;
+import com.javafix.agent.core.TestResult;
+import com.javafix.agent.core.TestRunner;
 import com.javafix.agent.tool.MavenTestRunner;
 import com.javafix.agent.tool.ReadFileTool;
+import com.javafix.agent.tool.ReplaceInFileTool;
 import com.javafix.agent.tool.RunTestsTool;
 import com.javafix.agent.tool.SearchCodeTool;
 import com.javafix.agent.tool.Tool;
@@ -15,6 +18,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -115,6 +119,26 @@ class AgentLoopTest {
                 StandardCharsets.UTF_8
         );
         assertTrue(source.contains("return a - b;"), "生产代码不该被修改，实际内容：\n" + source);
+    }
+
+    @Test
+    void shouldRefuseToReplaceMainSourceDuringReproduce() throws IOException {
+        BuggyCalculatorProject.create(project);
+        TestRunner passingTests = path -> new TestResult(0,
+                "Tests run: 1, Failures: 0, Errors: 0, Skipped: 0", "");
+        ScriptedLlmClient llm = new ScriptedLlmClient(
+                "TOOL: run_tests\n",
+                "TOOL: replace_in_file\nPATH: src/main/java/com/example/Calculator.java\n"
+                        + "FIND: return a - b;\nREPLACE: return a + b;\n"
+        );
+        AgentLoop loop = new AgentLoop(llm, List.of(
+                new ReplaceInFileTool(project), new RunTestsTool(passingTests, project)), 2);
+
+        loop.run("Calculator.add 返回错误");
+
+        assertTrue(String.join("\n", loop.transcript()).contains("禁止修改 src/main"));
+        assertTrue(Files.readString(project.resolve("src/main/java/com/example/Calculator.java"))
+                .contains("return a - b;"), "复现阶段不应允许局部替换生产代码");
     }
 
     @Test
@@ -223,6 +247,31 @@ class AgentLoopTest {
     }
 
     @Test
+    void shouldCountSuccessfulReplacementAsFixOutput() throws IOException {
+        BuggyCalculatorProject.create(project);
+        AtomicInteger testRuns = new AtomicInteger();
+        TestRunner tests = path -> testRuns.getAndIncrement() == 0
+                ? new TestResult(1, "Tests run: 1, Failures: 1, Errors: 0, Skipped: 0", "")
+                : new TestResult(0, "Tests run: 1, Failures: 0, Errors: 0, Skipped: 0", "");
+        ScriptedLlmClient llm = new ScriptedLlmClient(
+                "TOOL: run_tests\n",
+                "FINAL: Calculator.add 使用了减法\n",
+                "TOOL: replace_in_file\nPATH: src/main/java/com/example/Calculator.java\n"
+                        + "FIND: return a - b;\nREPLACE: return a + b;\n",
+                "FINAL: 将减法改为加法\n",
+                "TOOL: run_tests\n"
+        );
+        AgentLoop loop = new AgentLoop(llm, List.of(
+                new ReplaceInFileTool(project), new RunTestsTool(tests, project)), 5);
+
+        String answer = loop.run("Calculator.add 返回错误");
+
+        assertEquals("将减法改为加法", answer);
+        assertFalse(llm.prompts().get(3).contains("修复阶段到现在还没有改动任何文件"),
+                "成功的局部替换应计为修复产出");
+    }
+
+    @Test
     void shouldBounceBackToFixWhenVerificationStillFails() throws IOException {
 
         BuggyCalculatorProject.create(project);
@@ -317,5 +366,214 @@ class AgentLoopTest {
 
         String trace = String.join("\n", loop.transcript());
         assertTrue(trace.contains("（验证阶段未跑测试）"), "没跑测试不许宣布验证完成：\n" + trace);
+    }
+
+    @Test
+    void shouldRememberFailedFixInTheNextRepairPrompt() {
+        TestRunner failingTests = path -> new TestResult(1,
+                "Tests run: 1, Failures: 1, Errors: 0, Skipped: 0\n[ERROR] CalculatorTest: expected 5 but was -1", "");
+        ScriptedLlmClient llm = new ScriptedLlmClient(
+                "TOOL: run_tests\nTEST: CalculatorTest\n",
+                "FINAL: 根因是加法写成减法\n",
+                "TOOL: write_file\nPATH: src/main/java/Calculator.java\nCONTENT:\nclass Calculator {}\n",
+                "FINAL: 尝试只修改 Calculator.add\n",
+                "TOOL: run_tests\nTEST: CalculatorTest\n",
+                "FINAL: 下一轮先检查断言\n"
+        );
+        AgentLoop loop = new AgentLoop(llm, List.of(
+                new WriteFileTool(project), new RunTestsTool(failingTests, project)), 6);
+
+        loop.run("Calculator.add 返回错误");
+
+        String nextFixPrompt = llm.prompts().get(5);
+        assertTrue(nextFixPrompt.contains("失败尝试"), nextFixPrompt);
+        assertTrue(nextFixPrompt.contains("尝试只修改 Calculator.add"), nextFixPrompt);
+        assertTrue(nextFixPrompt.contains("CalculatorTest"), nextFixPrompt);
+        assertTrue(nextFixPrompt.contains("expected 5 but was -1"), nextFixPrompt);
+    }
+
+    @Test
+    void shouldNotReportSuccessAfterTheLastFailedVerification() {
+        TestRunner failingTests = path -> new TestResult(1,
+                "Tests run: 1, Failures: 1, Errors: 0, Skipped: 0", "");
+        ScriptedLlmClient llm = new ScriptedLlmClient(
+                "TOOL: run_tests\n", "FINAL: 根因已定位\n",
+                "TOOL: write_file\nPATH: src/main/java/Fix.java\nCONTENT:\nclass Fix {}\n", "FINAL: 第一次修复\n", "TOOL: run_tests\n",
+                "TOOL: write_file\nPATH: src/main/java/Fix.java\nCONTENT:\nclass Fix { int n; }\n", "FINAL: 第二次修复\n", "TOOL: run_tests\n",
+                "TOOL: write_file\nPATH: src/main/java/Fix.java\nCONTENT:\nclass Fix { int n = 1; }\n", "FINAL: 第三次修复\n", "TOOL: run_tests\n",
+                "FINAL: 已经修好\n"
+        );
+        AgentLoop loop = new AgentLoop(llm, List.of(
+                new WriteFileTool(project), new RunTestsTool(failingTests, project)), 12);
+
+        String answer = loop.run("持续失败的测试");
+
+        assertTrue(answer.contains("没能完成"), answer);
+        assertFalse(answer.contains("已经修好"), answer);
+    }
+
+    @Test
+    void shouldPublishEachCompletedStepForDurableRecording() {
+        TestRunner failingTests = path -> new TestResult(1,
+                "Tests run: 1, Failures: 1, Errors: 0, Skipped: 0", "");
+        ScriptedLlmClient llm = new ScriptedLlmClient("TOOL: run_tests\n");
+        List<String> recorded = new java.util.ArrayList<>();
+        AgentLoop loop = new AgentLoop(llm, List.of(new RunTestsTool(failingTests, project)), 1)
+                .onRecord(recorded::add);
+
+        loop.run("失败测试");
+
+        assertEquals(1, recorded.size());
+        assertTrue(recorded.get(0).contains("Tests run: 1"));
+    }
+
+    @Test
+    void shouldKeepVerifyingAfterAnInconclusiveTimeout() {
+        AtomicInteger calls = new AtomicInteger();
+        TestRunner tests = path -> calls.getAndIncrement() == 0
+                ? new TestResult(1, "Tests run: 1, Failures: 1, Errors: 0", "")
+                : new TestResult(TestResult.EXIT_TIMEOUT, "Tests run: 1, Failures: 0, Errors: 0", "");
+        ScriptedLlmClient llm = new ScriptedLlmClient(
+                "TOOL: run_tests\n", "FINAL: 定位完成\n",
+                "TOOL: write_file\nPATH: src/main/java/Fix.java\nCONTENT:\nclass Fix {}\n",
+                "FINAL: 修改了 Fix\n", "TOOL: run_tests\n", "FINAL: 已修复\n");
+        AgentLoop loop = new AgentLoop(llm, List.of(
+                new WriteFileTool(project), new RunTestsTool(tests, project)), 6);
+
+        String answer = loop.run("测试超时");
+
+        assertTrue(answer.contains("没能完成"), answer);
+        assertTrue(llm.prompts().get(5).contains("当前阶段：验证"));
+        assertFalse(llm.prompts().get(5).contains("失败尝试"));
+    }
+
+    @Test
+    void shouldNotAcceptAZeroTestRunAsVerification() {
+        AtomicInteger calls = new AtomicInteger();
+        TestRunner tests = path -> calls.getAndIncrement() == 0
+                ? new TestResult(1, "Tests run: 1, Failures: 1, Errors: 0", "")
+                : new TestResult(0, "Tests run: 0, Failures: 0, Errors: 0", "");
+        ScriptedLlmClient llm = new ScriptedLlmClient(
+                "TOOL: run_tests\n", "FINAL: 定位完成\n",
+                "TOOL: write_file\nPATH: src/main/java/Fix.java\nCONTENT:\nclass Fix {}\n",
+                "FINAL: 修改了 Fix\n", "TOOL: run_tests\n", "FINAL: 已修复\n");
+        AgentLoop loop = new AgentLoop(llm, List.of(
+                new WriteFileTool(project), new RunTestsTool(tests, project)), 6);
+
+        String answer = loop.run("测试选择器错误");
+
+        assertTrue(answer.contains("没能完成"), answer);
+        assertTrue(llm.prompts().get(5).contains("当前阶段：验证"));
+    }
+
+    @Test
+    void shouldNotAcceptPassingTestsOutsideTheReproducedScope() {
+        TestRunner tests = new TestRunner() {
+            @Override
+            public TestResult run(Path path) {
+                return new TestResult(1, "Tests run: 1, Failures: 1, Errors: 0", "");
+            }
+
+            @Override
+            public TestResult run(Path path, String selector) {
+                return "CalculatorTest".equals(selector)
+                        ? new TestResult(1, "Tests run: 1, Failures: 1, Errors: 0", "")
+                        : new TestResult(0, "Tests run: 1, Failures: 0, Errors: 0", "");
+            }
+        };
+        ScriptedLlmClient llm = new ScriptedLlmClient(
+                "TOOL: run_tests\nTEST: CalculatorTest\n", "FINAL: 定位完成\n",
+                "TOOL: write_file\nPATH: src/main/java/Fix.java\nCONTENT:\nclass Fix {}\n",
+                "FINAL: 修改了 Fix\n", "TOOL: run_tests\nTEST: UnrelatedTest\n", "FINAL: 已修复\n");
+        AgentLoop loop = new AgentLoop(llm, List.of(
+                new WriteFileTool(project), new RunTestsTool(tests, project)), 6);
+
+        String answer = loop.run("CalculatorTest 失败");
+
+        assertTrue(answer.contains("没能完成"), answer);
+        assertTrue(llm.prompts().get(5).contains("当前阶段：验证"));
+    }
+
+    @Test
+    void shouldNotCountMavenInfrastructureFailureAsAFailedFix() {
+        AtomicInteger calls = new AtomicInteger();
+        TestRunner tests = path -> calls.getAndIncrement() == 0
+                ? new TestResult(1, "Tests run: 1, Failures: 1, Errors: 0", "")
+                : new TestResult(1, "[ERROR] Could not resolve dependencies for project", "");
+        ScriptedLlmClient llm = new ScriptedLlmClient(
+                "TOOL: run_tests\n", "FINAL: 定位完成\n",
+                "TOOL: write_file\nPATH: src/main/java/Fix.java\nCONTENT:\nclass Fix {}\n",
+                "FINAL: 修改了 Fix\n", "TOOL: run_tests\n", "FINAL: 已修复\n");
+        AgentLoop loop = new AgentLoop(llm, List.of(
+                new WriteFileTool(project), new RunTestsTool(tests, project)), 6);
+
+        String answer = loop.run("构建失败");
+
+        assertTrue(answer.contains("没能完成"), answer);
+        assertTrue(llm.prompts().get(5).contains("当前阶段：验证"));
+        assertFalse(llm.prompts().get(5).contains("失败尝试"));
+    }
+
+    @Test
+    void shouldNotAcceptVerificationAfterTheReproducedTestWasChanged() throws IOException {
+        Path testFile = project.resolve("src/test/java/CalculatorTest.java");
+        Files.createDirectories(testFile.getParent());
+        Files.writeString(testFile, "class CalculatorTest { /* failing case */ }");
+        AtomicInteger calls = new AtomicInteger();
+        TestRunner tests = path -> calls.getAndIncrement() == 0
+                ? new TestResult(1, "Tests run: 2, Failures: 1, Errors: 0", "")
+                : new TestResult(0, "Tests run: 2, Failures: 0, Errors: 0", "");
+        ScriptedLlmClient llm = new ScriptedLlmClient(
+                "TOOL: run_tests\n", "FINAL: 定位完成\n",
+                "TOOL: write_file\nPATH: src/test/java/CalculatorTest.java\nCONTENT:\nclass CalculatorTest {}\n",
+                "FINAL: 已修复\n", "TOOL: run_tests\n", "FINAL: 已修复\n");
+        AgentLoop loop = new AgentLoop(llm, List.of(
+                new WriteFileTool(project), new RunTestsTool(tests, project)), 6);
+
+        String answer = loop.run("CalculatorTest 失败");
+
+        assertTrue(answer.contains("没能完成"), answer);
+        assertTrue(String.join("\n", loop.transcript()).contains("验证结果不充分"));
+    }
+
+    @Test
+    void shouldNotAcceptVerificationWhenFewerTestsRan() {
+        AtomicInteger calls = new AtomicInteger();
+        TestRunner tests = path -> calls.getAndIncrement() == 0
+                ? new TestResult(1, "Tests run: 2, Failures: 1, Errors: 0", "")
+                : new TestResult(0, "Tests run: 1, Failures: 0, Errors: 0", "");
+        ScriptedLlmClient llm = new ScriptedLlmClient(
+                "TOOL: run_tests\n", "FINAL: 定位完成\n",
+                "TOOL: write_file\nPATH: src/main/java/Fix.java\nCONTENT:\nclass Fix {}\n",
+                "FINAL: 已修复\n", "TOOL: run_tests\n", "FINAL: 已修复\n");
+        AgentLoop loop = new AgentLoop(llm, List.of(
+                new WriteFileTool(project), new RunTestsTool(tests, project)), 6);
+
+        String answer = loop.run("CalculatorTest 失败");
+
+        assertTrue(answer.contains("没能完成"), answer);
+        assertTrue(String.join("\n", loop.transcript()).contains("验证结果不充分"));
+    }
+
+    @Test
+    void shouldNotAcceptVerificationAfterAModuleTestWasChanged() throws IOException {
+        Path testFile = project.resolve("service/src/test/java/CalculatorTest.java");
+        Files.createDirectories(testFile.getParent());
+        Files.writeString(testFile, "class CalculatorTest { /* failing case */ }");
+        AtomicInteger calls = new AtomicInteger();
+        TestRunner tests = path -> calls.getAndIncrement() == 0
+                ? new TestResult(1, "Tests run: 2, Failures: 1, Errors: 0", "")
+                : new TestResult(0, "Tests run: 2, Failures: 0, Errors: 0", "");
+        ScriptedLlmClient llm = new ScriptedLlmClient(
+                "TOOL: run_tests\n", "FINAL: 定位完成\n",
+                "TOOL: write_file\nPATH: service/src/test/java/CalculatorTest.java\nCONTENT:\nclass CalculatorTest {}\n",
+                "FINAL: 已修复\n", "TOOL: run_tests\n", "FINAL: 已修复\n");
+        AgentLoop loop = new AgentLoop(llm, List.of(
+                new WriteFileTool(project), new RunTestsTool(tests, project)), 6);
+
+        String answer = loop.run("模块内 CalculatorTest 失败");
+
+        assertTrue(answer.contains("没能完成"), answer);
+        assertTrue(String.join("\n", loop.transcript()).contains("验证结果不充分"));
     }
 }
