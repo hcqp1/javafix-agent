@@ -34,18 +34,30 @@ public final class DiagnosticWorkspace implements AutoCloseable {
             throw new IllegalArgumentException("maxBytes must not be negative");
         }
         Path source = projectRoot.toAbsolutePath().normalize();
-        if (!Files.isDirectory(source)) {
+        return create(source, maxBytes, Path.of(System.getProperty("java.io.tmpdir")));
+    }
+
+    static DiagnosticWorkspace create(Path projectRoot, long maxBytes, Path temporaryBase) throws IOException {
+        if (maxBytes < 0) {
+            throw new IllegalArgumentException("maxBytes must not be negative");
+        }
+        Path source = projectRoot.toAbsolutePath().normalize();
+        if (Files.isSymbolicLink(source) || !Files.isDirectory(source)) {
             throw new IOException("Project root is not a directory: " + source);
         }
+        Path tempBase = temporaryBase.toAbsolutePath().normalize();
+        if (!Files.isDirectory(tempBase)) {
+            throw new IOException("Temporary directory is not a directory: " + tempBase);
+        }
 
-        Path temp = Files.createTempDirectory("javafix-diagnostic-");
+        Path temp = Files.createTempDirectory(tempBase, "javafix-diagnostic-").toAbsolutePath().normalize();
         DiagnosticWorkspace workspace = new DiagnosticWorkspace(temp);
         try {
             Files.createDirectory(workspace.baselineRoot);
             Files.createDirectory(workspace.instrumentedRoot);
             long[] copiedBytes = {0};
-            copyProject(source, workspace.baselineRoot, maxBytes, copiedBytes);
-            copyProject(source, workspace.instrumentedRoot, maxBytes, copiedBytes);
+            copyProject(source, workspace.baselineRoot, temp, maxBytes, copiedBytes);
+            copyProject(source, workspace.instrumentedRoot, temp, maxBytes, copiedBytes);
             return workspace;
         } catch (IOException | RuntimeException failure) {
             try {
@@ -70,11 +82,15 @@ public final class DiagnosticWorkspace implements AutoCloseable {
         deleteRecursively(temporaryRoot);
     }
 
-    private static void copyProject(Path source, Path destination, long maxBytes, long[] copiedBytes)
+    private static void copyProject(Path source, Path destination, Path excludedRoot,
+                                    long maxBytes, long[] copiedBytes)
             throws IOException {
         Files.walkFileTree(source, new SimpleFileVisitor<>() {
             @Override
             public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
+                if (dir.startsWith(excludedRoot)) {
+                    return FileVisitResult.SKIP_SUBTREE;
+                }
                 if (!dir.equals(source) && SKIPPED_DIRECTORIES.contains(dir.getFileName().toString())) {
                     return FileVisitResult.SKIP_SUBTREE;
                 }

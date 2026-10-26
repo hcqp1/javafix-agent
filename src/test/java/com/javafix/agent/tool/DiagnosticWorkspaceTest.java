@@ -43,16 +43,56 @@ class DiagnosticWorkspaceTest {
     @Test
     void skipsSymbolicLinks() throws Exception {
         Path outside = Files.createTempFile("diagnostic-workspace-link", ".txt");
-        Files.writeString(outside, "outside");
         try {
+            Files.writeString(outside, "outside");
             Files.createSymbolicLink(project.resolve("linked.txt"), outside);
         } catch (UnsupportedOperationException | IOException e) {
+            Files.deleteIfExists(outside);
             Assumptions.abort("Symbolic links are unavailable: " + e.getMessage());
         }
+        try {
+            try (DiagnosticWorkspace workspace = DiagnosticWorkspace.create(project)) {
+                assertFalse(Files.exists(workspace.baselineRoot().resolve("linked.txt")));
+                assertFalse(Files.exists(workspace.instrumentedRoot().resolve("linked.txt")));
+            }
+        } finally {
+            Files.deleteIfExists(project.resolve("linked.txt"));
+            Files.deleteIfExists(outside);
+        }
+    }
 
-        try (DiagnosticWorkspace workspace = DiagnosticWorkspace.create(project)) {
-            assertFalse(Files.exists(workspace.baselineRoot().resolve("linked.txt")));
-            assertFalse(Files.exists(workspace.instrumentedRoot().resolve("linked.txt")));
+    @Test
+    void rejectsSymbolicLinkAsProjectRoot() throws Exception {
+        Path link = project.getParent().resolve("diagnostic-project-link");
+        try {
+            Files.createSymbolicLink(link, project);
+        } catch (UnsupportedOperationException | IOException e) {
+            Files.deleteIfExists(link);
+            Assumptions.abort("Symbolic links are unavailable: " + e.getMessage());
+            return;
+        }
+        try {
+            assertThrows(IOException.class, () -> DiagnosticWorkspace.create(link));
+        } finally {
+            Files.deleteIfExists(link);
+        }
+    }
+
+    @Test
+    void skipsTemporaryRootWhenItIsCreatedInsideSourceTree() throws Exception {
+        Path tempBase = project.resolve("temporary-area");
+        Files.createDirectories(tempBase);
+        Files.writeString(project.resolve("project.txt"), "source");
+
+        try (DiagnosticWorkspace workspace = DiagnosticWorkspace.create(project, 1024, tempBase)) {
+            assertEquals("source", Files.readString(workspace.baselineRoot().resolve("project.txt")));
+            assertEquals("source", Files.readString(workspace.instrumentedRoot().resolve("project.txt")));
+            try (var entries = Files.list(workspace.baselineRoot().resolve("temporary-area"))) {
+                assertTrue(entries.findAny().isEmpty(), "generated workspace must not be copied into itself");
+            }
+            try (var entries = Files.list(workspace.instrumentedRoot().resolve("temporary-area"))) {
+                assertTrue(entries.findAny().isEmpty(), "generated workspace must not be copied into itself");
+            }
         }
     }
 
