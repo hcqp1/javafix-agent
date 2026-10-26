@@ -45,12 +45,13 @@ public final class DiagnosticWorkspace implements AutoCloseable {
         if (Files.isSymbolicLink(source) || !Files.isDirectory(source)) {
             throw new IOException("Project root is not a directory: " + source);
         }
-        Path tempBase = temporaryBase.toAbsolutePath().normalize();
+        source = source.toRealPath();
+        Path tempBase = temporaryBase.toRealPath();
         if (!Files.isDirectory(tempBase)) {
             throw new IOException("Temporary directory is not a directory: " + tempBase);
         }
 
-        Path temp = Files.createTempDirectory(tempBase, "javafix-diagnostic-").toAbsolutePath().normalize();
+        Path temp = Files.createTempDirectory(tempBase, "javafix-diagnostic-");
         DiagnosticWorkspace workspace = new DiagnosticWorkspace(temp);
         try {
             Files.createDirectory(workspace.baselineRoot);

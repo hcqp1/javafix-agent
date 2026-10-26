@@ -43,38 +43,77 @@ class DiagnosticWorkspaceTest {
     @Test
     void skipsSymbolicLinks() throws Exception {
         Path outside = Files.createTempFile("diagnostic-workspace-link", ".txt");
+        Path link = project.resolve("linked.txt");
+        boolean created = false;
         try {
             Files.writeString(outside, "outside");
-            Files.createSymbolicLink(project.resolve("linked.txt"), outside);
-        } catch (UnsupportedOperationException | IOException e) {
-            Files.deleteIfExists(outside);
-            Assumptions.abort("Symbolic links are unavailable: " + e.getMessage());
-        }
-        try {
+            try {
+                Files.createSymbolicLink(link, outside);
+                created = true;
+            } catch (UnsupportedOperationException | IOException e) {
+                Assumptions.abort("Symbolic links are unavailable: " + e.getMessage());
+                return;
+            }
             try (DiagnosticWorkspace workspace = DiagnosticWorkspace.create(project)) {
                 assertFalse(Files.exists(workspace.baselineRoot().resolve("linked.txt")));
                 assertFalse(Files.exists(workspace.instrumentedRoot().resolve("linked.txt")));
             }
         } finally {
-            Files.deleteIfExists(project.resolve("linked.txt"));
+            if (created) {
+                Files.deleteIfExists(link);
+            }
             Files.deleteIfExists(outside);
         }
     }
 
     @Test
     void rejectsSymbolicLinkAsProjectRoot() throws Exception {
-        Path link = project.getParent().resolve("diagnostic-project-link");
+        Path link = project.resolve("diagnostic-project-link");
+        boolean created = false;
         try {
             Files.createSymbolicLink(link, project);
+            created = true;
         } catch (UnsupportedOperationException | IOException e) {
-            Files.deleteIfExists(link);
             Assumptions.abort("Symbolic links are unavailable: " + e.getMessage());
             return;
         }
         try {
             assertThrows(IOException.class, () -> DiagnosticWorkspace.create(link));
         } finally {
-            Files.deleteIfExists(link);
+            if (created) {
+                Files.deleteIfExists(link);
+            }
+        }
+    }
+
+    @Test
+    void skipsPhysicalTemporaryRootReachedThroughSymlinkedBase() throws Exception {
+        Path source = project.resolve("source");
+        Path physicalTempBase = source.resolve("physical-temp");
+        Path tempBaseLink = project.resolve("temp-base-link");
+        Files.createDirectories(physicalTempBase);
+        Files.createDirectories(source);
+        Files.writeString(source.resolve("project.txt"), "source");
+        boolean created = false;
+        try {
+            Files.createSymbolicLink(tempBaseLink, physicalTempBase);
+            created = true;
+        } catch (UnsupportedOperationException | IOException e) {
+            Assumptions.abort("Symbolic links are unavailable: " + e.getMessage());
+            return;
+        }
+        try {
+            try (DiagnosticWorkspace workspace = DiagnosticWorkspace.create(source, 1024, tempBaseLink)) {
+                assertEquals("source", Files.readString(workspace.baselineRoot().resolve("project.txt")));
+                assertEquals("source", Files.readString(workspace.instrumentedRoot().resolve("project.txt")));
+                try (var entries = Files.list(workspace.baselineRoot().resolve("physical-temp"))) {
+                    assertTrue(entries.findAny().isEmpty(), "physical temporary workspace must not copy itself");
+                }
+            }
+        } finally {
+            if (created) {
+                Files.deleteIfExists(tempBaseLink);
+            }
         }
     }
 
