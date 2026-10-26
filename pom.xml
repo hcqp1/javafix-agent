@@ -28,7 +28,7 @@
 
     <dependencies>
         <!--
-            唯一的生产依赖。选它的理由：模型返回的是嵌套 JSON，且内容里会带引号、
+            JSON 依赖。选它的理由：模型返回的是嵌套 JSON，且内容里会带引号、
             换行和 unicode 转义，手写解析器属于自找麻烦。HTTP 本身用 JDK 自带的
             HttpClient，不再引额外的 HTTP 库。
         -->
@@ -36,6 +36,12 @@
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
             <version>${jackson.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>com.github.javaparser</groupId>
+            <artifactId>javaparser-core</artifactId>
+            <version>3.26.3</version>
         </dependency>
 
         <dependency>
