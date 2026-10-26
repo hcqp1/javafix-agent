@@ -7,7 +7,6 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
 import java.nio.file.Files;
-import java.nio.file.FileSystemException;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -53,17 +52,9 @@ class TestOutcomeSignatureTest {
     }
 
     @Test
-    void wrapsWalkFailuresAsParseException() throws IOException {
-        Path reports = temp.resolve("loop");
-        Files.createDirectories(reports);
-        try {
-            Files.createSymbolicLink(reports.resolve("cycle"), reports);
-        } catch (UnsupportedOperationException | FileSystemException e) {
-            org.junit.jupiter.api.Assumptions.assumeTrue(false, "Symbolic links unavailable: " + e.getMessage());
-        }
-        TestOutcomeSignature.ParseException failure = assertThrows(TestOutcomeSignature.ParseException.class,
-                () -> TestOutcomeSignature.read(reports));
-        assertNotNull(failure.getCause());
+    void rejectsTestcaseNotDirectlyInsideSuite() throws IOException {
+        Path reports = Path.of("src/test/resources/surefire/orphan-testcase");
+        assertThrows(TestOutcomeSignature.ParseException.class, () -> TestOutcomeSignature.read(reports));
     }
 
     @Test

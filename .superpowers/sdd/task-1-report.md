@@ -34,3 +34,18 @@ Added tests first for a `<foo>` root and for a valid report mixed with an empty 
 ### Verification after fixes
 - `mvn -Dtest=TestOutcomeSignatureTest test`: passed, 8 tests, 0 failures, 0 errors, 1 skipped (symlink-cycle setup unavailable).
 - `mvn test`: passed, 80 tests, 0 failures, 0 errors, 3 skipped; BUILD SUCCESS, 2:21 min.
+
+## Follow-up review fixes (2026-10-26)
+
+### Findings addressed
+- Removed the symbolic-link traversal test because `Files.walk` does not follow symlinks by default; production still wraps `UncheckedIOException` as `ParseException`.
+- Added `src/test/resources/surefire/orphan-testcase/TEST-orphan.xml` and a test proving a testcase directly under `<testsuites>` is rejected, even when a sibling `<testsuite/>` exists.
+- Enforced that every testcase element is directly parented by a `testsuite` element.
+
+### TDD evidence
+The new orphan-testcase test failed before implementation because the parser accepted the document. It passes after the parent validation was added.
+
+### Verification after follow-up fixes
+- `mvn -Dtest=TestOutcomeSignatureTest test`: passed, 8 tests, 0 failures, 0 errors, 0 skipped.
+- `mvn test`: BUILD SUCCESS, 80 tests, 0 failures, 0 errors, 2 skipped; 2:22 min.
+- `git diff --check`: passed.

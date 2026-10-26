@@ -78,6 +78,9 @@ public final class TestOutcomeSignature {
                 }
                 for (int i = 0; i < testcases.getLength(); i++) {
                     Element testcase = (Element) testcases.item(i);
+                    if (!(testcase.getParentNode() instanceof Element parent) || !parent.getTagName().equals("testsuite")) {
+                        throw new ParseException("Test case is not directly inside a testsuite in " + report);
+                    }
                     String className = testcase.getAttribute("classname");
                     String testName = testcase.getAttribute("name");
                     if (className.isEmpty() || testName.isEmpty()) {
