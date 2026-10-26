@@ -10,6 +10,7 @@ import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.parsers.ParserConfigurationException;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -40,6 +41,8 @@ public final class TestOutcomeSignature {
                     .sorted().toList();
         } catch (IOException e) {
             throw new ParseException("Unable to list Surefire reports", e);
+        } catch (UncheckedIOException e) {
+            throw new ParseException("Unable to traverse Surefire reports: " + e.getMessage(), e);
         }
         if (reports.isEmpty()) {
             throw new ParseException("No Surefire XML reports found in " + reportsDirectory);
@@ -61,7 +64,18 @@ public final class TestOutcomeSignature {
                     @Override public void fatalError(org.xml.sax.SAXParseException e) throws SAXException { throw e; }
                 });
                 var document = builder.parse(report.toFile());
-                NodeList testcases = document.getElementsByTagName("testcase");
+                Element root = document.getDocumentElement();
+                if (root == null || !(root.getTagName().equals("testsuite") || root.getTagName().equals("testsuites"))) {
+                    throw new ParseException("Invalid Surefire report root in " + report);
+                }
+                NodeList suites = root.getElementsByTagName("testsuite");
+                if (root.getTagName().equals("testsuites") && suites.getLength() == 0) {
+                    throw new ParseException("No testsuite elements in " + report);
+                }
+                NodeList testcases = root.getElementsByTagName("testcase");
+                if (testcases.getLength() == 0) {
+                    throw new ParseException("No test cases in Surefire report " + report);
+                }
                 for (int i = 0; i < testcases.getLength(); i++) {
                     Element testcase = (Element) testcases.item(i);
                     String className = testcase.getAttribute("classname");

@@ -6,6 +6,8 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
+import java.nio.file.Files;
+import java.nio.file.FileSystemException;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -31,6 +33,37 @@ class TestOutcomeSignatureTest {
         java.nio.file.Files.createDirectories(reports);
         java.nio.file.Files.writeString(reports.resolve("TEST-broken.xml"), "<testsuite><testcase>");
         assertThrows(TestOutcomeSignature.ParseException.class, () -> TestOutcomeSignature.read(reports));
+    }
+
+    @Test
+    void rejectsXmlWithNonSurefireRoot() throws IOException {
+        Path reports = temp.resolve("wrong-root");
+        Files.createDirectories(reports);
+        Files.writeString(reports.resolve("TEST-wrong.xml"), "<foo><testcase classname=\"example.Test\" name=\"works\"/></foo>");
+        assertThrows(TestOutcomeSignature.ParseException.class, () -> TestOutcomeSignature.read(reports));
+    }
+
+    @Test
+    void rejectsAnEmptyReportEvenWhenAnotherReportHasTests() throws IOException {
+        Path reports = temp.resolve("mixed-empty");
+        Files.createDirectories(reports);
+        Files.writeString(reports.resolve("TEST-valid.xml"), "<testsuite><testcase classname=\"example.Test\" name=\"works\"/></testsuite>");
+        Files.writeString(reports.resolve("TEST-empty.xml"), "<testsuite tests=\"0\"/>");
+        assertThrows(TestOutcomeSignature.ParseException.class, () -> TestOutcomeSignature.read(reports));
+    }
+
+    @Test
+    void wrapsWalkFailuresAsParseException() throws IOException {
+        Path reports = temp.resolve("loop");
+        Files.createDirectories(reports);
+        try {
+            Files.createSymbolicLink(reports.resolve("cycle"), reports);
+        } catch (UnsupportedOperationException | FileSystemException e) {
+            org.junit.jupiter.api.Assumptions.assumeTrue(false, "Symbolic links unavailable: " + e.getMessage());
+        }
+        TestOutcomeSignature.ParseException failure = assertThrows(TestOutcomeSignature.ParseException.class,
+                () -> TestOutcomeSignature.read(reports));
+        assertNotNull(failure.getCause());
     }
 
     @Test
