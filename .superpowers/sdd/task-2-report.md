@@ -26,3 +26,19 @@ The workspace walker skips the generated temp root and its descendants, preventi
 
 - `2dca795` — `feat: isolate trace diagnostics in temp copies`
 - `aea11ef` — `fix: harden diagnostic workspace boundaries`
+
+## Re-review follow-up: Physical path containment
+
+Resolved the source root and configured temporary base with `toRealPath()` before walking or comparing paths. The generated temp root is created under that resolved base, so the walker exclusion uses the physical location even when the configured base is a symlink into the source tree. Added a deterministic regression fixture with the source at `@TempDir/source`, a physical temp directory under that source, and a temp-base symlink outside the source that points back into it. The test skips only when symlink creation is unavailable.
+
+Moved the project-root symlink fixture into its unique `@TempDir` and only delete it when creation succeeded. The linked-file fixture also uses a unique in-project link name and always removes its external target in `finally`, including when link creation or assertions fail.
+
+Verification after this follow-up:
+
+- `mvn -Dtest=DiagnosticWorkspaceTest test` — passed (6 tests, 0 failures, 0 errors, 3 skipped).
+- `mvn test` — passed (86 tests, 0 failures, 0 errors, 5 skipped).
+- `git diff --check` — passed before commit.
+
+Symlink-specific tests were skipped because this Windows environment does not permit creating symlinks, so the new physical-alias regression is checked in but could not execute its symlink branch here.
+
+Follow-up commit: `4490f35` — `fix: resolve diagnostic workspace paths physically`.
