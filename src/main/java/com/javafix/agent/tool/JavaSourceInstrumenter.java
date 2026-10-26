@@ -12,6 +12,7 @@ import com.github.javaparser.ast.body.TypeDeclaration;
 import com.github.javaparser.ast.body.VariableDeclarator;
 import com.github.javaparser.ast.expr.AssignExpr;
 import com.github.javaparser.ast.expr.Expression;
+import com.github.javaparser.ast.expr.TypePatternExpr;
 import com.github.javaparser.ast.expr.VariableDeclarationExpr;
 import com.github.javaparser.ast.nodeTypes.NodeWithAnnotations;
 import com.github.javaparser.ast.nodeTypes.NodeWithSimpleName;
@@ -165,7 +166,7 @@ public final class JavaSourceInstrumenter {
 
     private static void checkHelperConflict(Node node, String leadingName) throws InstrumentationException {
         if ((node instanceof VariableDeclarator || node instanceof Parameter || node instanceof TypeParameter
-                || node instanceof TypeDeclaration<?> || node instanceof EnumConstantDeclaration)
+                || node instanceof TypeDeclaration<?> || node instanceof EnumConstantDeclaration || node instanceof TypePatternExpr)
                 && node instanceof NodeWithSimpleName<?> named && named.getNameAsString().equals(leadingName)) {
             throw new InstrumentationException("Helper name conflict: " + leadingName + " is declared at line "
                     + line(node) + "; choose a different generated helper name");

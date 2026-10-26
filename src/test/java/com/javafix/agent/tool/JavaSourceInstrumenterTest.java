@@ -146,6 +146,12 @@ class JavaSourceInstrumenterTest {
     }
 
     @Test
+    void rejectsHelperShadowedByJava17TypePatternBinding() throws Exception {
+        assertDiagnostic("class TraceFixture { void selected(Object o) { if (o instanceof String TraceSink) {} } }",
+                "Helper name conflict");
+    }
+
+    @Test
     void rejectsHelperShadowedByFieldsAndOtherLexicalDeclarations() throws Exception {
         assertDiagnostic("class TraceFixture { int TraceSink; void selected() {} }", "Helper name conflict");
         assertDiagnostic("class Outer { int TraceSink; class TraceFixture { void selected() {} } }", "Helper name conflict");
