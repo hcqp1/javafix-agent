@@ -3,17 +3,23 @@ package com.javafix.agent.tool;
 import com.github.javaparser.JavaParser;
 import com.github.javaparser.ParserConfiguration;
 import com.github.javaparser.Position;
+import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.Node;
+import com.github.javaparser.ast.body.EnumConstantDeclaration;
 import com.github.javaparser.ast.body.MethodDeclaration;
+import com.github.javaparser.ast.body.Parameter;
 import com.github.javaparser.ast.body.TypeDeclaration;
+import com.github.javaparser.ast.body.VariableDeclarator;
 import com.github.javaparser.ast.expr.AssignExpr;
 import com.github.javaparser.ast.expr.Expression;
 import com.github.javaparser.ast.expr.VariableDeclarationExpr;
 import com.github.javaparser.ast.nodeTypes.NodeWithAnnotations;
+import com.github.javaparser.ast.nodeTypes.NodeWithSimpleName;
 import com.github.javaparser.ast.stmt.BlockStmt;
 import com.github.javaparser.ast.stmt.ExpressionStmt;
 import com.github.javaparser.ast.stmt.IfStmt;
 import com.github.javaparser.ast.stmt.Statement;
+import com.github.javaparser.ast.type.TypeParameter;
 
 import javax.lang.model.SourceVersion;
 import java.io.IOException;
@@ -22,6 +28,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 
 /** Adds probes at AST statement boundaries without rewriting any original source. */
 public final class JavaSourceInstrumenter {
@@ -40,7 +47,7 @@ public final class JavaSourceInstrumenter {
     public Result instrument(Path sourceFile, String className, String methodName, String helperClassName)
             throws IOException, InstrumentationException {
         for (Path component : sourceFile.toAbsolutePath().normalize()) {
-            String name = component.toString();
+            String name = component.toString().toLowerCase(Locale.ROOT);
             if (name.contains("generated-sources") || name.contains("generated-test-sources")) {
                 throw new InstrumentationException("Generated source is unsupported: " + sourceFile);
             }
@@ -79,6 +86,7 @@ public final class JavaSourceInstrumenter {
         }
         BlockStmt body = method.getBody().orElseThrow(() ->
                 new InstrumentationException("Selected method has no body: " + className + "." + methodName));
+        validateHelperReference(method, helperClassName);
         List<Insertion> insertions = new ArrayList<>();
         List<String> skipped = new ArrayList<>();
         addProbe(insertions, source, helperClassName, "METHOD_ENTRY", line(method), "", "null",
@@ -121,6 +129,47 @@ public final class JavaSourceInstrumenter {
             transformed.insert(insertion.offset(), insertion.text());
         }
         return new Result(transformed.toString(), insertions.size(), skipped);
+    }
+
+    private static void validateHelperReference(MethodDeclaration method, String helper)
+            throws InstrumentationException {
+        String leadingName = helper.split("\\.", 2)[0];
+        for (Node enclosing = method; enclosing != null; enclosing = enclosing.getParentNode().orElse(null)) {
+            if (!(enclosing instanceof TypeDeclaration<?>) && !(enclosing instanceof CompilationUnit)) {
+                // Fail closed across nested lexical scopes, including captured locals of local classes.
+                for (Node node : enclosing.stream().toList()) {
+                    checkHelperConflict(node, leadingName);
+                }
+            } else if (enclosing instanceof TypeDeclaration<?> type) {
+                checkHelperConflict(type, leadingName);
+                for (Node member : type.getChildNodes()) {
+                    checkHelperConflict(member, leadingName);
+                }
+                for (var field : type.getFields()) {
+                    for (var variable : field.getVariables()) {
+                        checkHelperConflict(variable, leadingName);
+                    }
+                }
+            }
+        }
+        var unit = method.findCompilationUnit().orElseThrow();
+        for (var type : unit.getTypes()) {
+            checkHelperConflict(type, leadingName);
+        }
+        for (var imported : unit.getImports()) {
+            if (!imported.isAsterisk() && imported.getName().getIdentifier().equals(leadingName)) {
+                throw new InstrumentationException("Helper name conflict: " + leadingName + " is imported at line " + line(imported));
+            }
+        }
+    }
+
+    private static void checkHelperConflict(Node node, String leadingName) throws InstrumentationException {
+        if ((node instanceof VariableDeclarator || node instanceof Parameter || node instanceof TypeParameter
+                || node instanceof TypeDeclaration<?> || node instanceof EnumConstantDeclaration)
+                && node instanceof NodeWithSimpleName<?> named && named.getNameAsString().equals(leadingName)) {
+            throw new InstrumentationException("Helper name conflict: " + leadingName + " is declared at line "
+                    + line(node) + "; choose a different generated helper name");
+        }
     }
 
     private static boolean belongsToMethod(Node node, MethodDeclaration method) {

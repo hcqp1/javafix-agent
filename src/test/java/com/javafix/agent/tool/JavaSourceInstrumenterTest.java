@@ -140,6 +140,63 @@ class JavaSourceInstrumenterTest {
     }
 
     @Test
+    void rejectsHelperShadowedByParameterOrLocal() throws Exception {
+        assertDiagnostic("class TraceFixture { void selected(int TraceSink) {} }", "Helper name conflict");
+        assertDiagnostic("class TraceFixture { void selected() { int TraceSink = 1; } }", "Helper name conflict");
+    }
+
+    @Test
+    void rejectsHelperShadowedByFieldsAndOtherLexicalDeclarations() throws Exception {
+        assertDiagnostic("class TraceFixture { int TraceSink; void selected() {} }", "Helper name conflict");
+        assertDiagnostic("class Outer { int TraceSink; class TraceFixture { void selected() {} } }", "Helper name conflict");
+        assertDiagnostic("class TraceFixture { void selected() { class TraceSink {} int x = 1; } }", "Helper name conflict");
+        assertDiagnostic("class TraceFixture<TraceSink> { void selected() {} }", "Helper name conflict");
+        assertDiagnostic("class TraceFixture { <TraceSink> void selected() {} }", "Helper name conflict");
+        assertDiagnostic("class TraceFixture { class TraceSink {} void selected() {} }", "Helper name conflict");
+        assertDiagnostic("record TraceFixture(int TraceSink) { void selected() {} }", "Helper name conflict");
+        assertDiagnostic("enum TraceFixture { TraceSink; void selected() {} }", "Helper name conflict");
+        assertDiagnostic("class TraceSink {} class TraceFixture { void selected() {} }", "Helper name conflict");
+        assertDiagnostic("import support.TraceSink; class TraceFixture { void selected() {} }", "Helper name conflict");
+        assertDiagnostic("class TraceFixture { void selected() { try {} catch (RuntimeException TraceSink) {} } }", "Helper name conflict");
+    }
+
+    @Test
+    void rejectsHelperShadowingCapturedByLocalClassesInOtherLexicalContexts() throws Exception {
+        assertDiagnostic("class Outer { Outer(int TraceSink) { class TraceFixture { void selected() {} } } }", "Helper name conflict");
+        assertDiagnostic("class Outer { { int TraceSink = 1; class TraceFixture { void selected() {} } } }", "Helper name conflict");
+        assertDiagnostic("class Outer { java.util.function.Function<Integer,Object> f = TraceSink -> { class TraceFixture { void selected() {} } return null; }; }", "Helper name conflict");
+    }
+
+    @Test
+    void qualifiedHelperChecksItsLeadingIdentifierRatherThanOnlyItsSimpleName() throws Exception {
+        Path source = write("class TraceFixture { void selected(int TraceSink) {} }");
+        var result = new JavaSourceInstrumenter().instrument(source, "TraceFixture", "selected", "support.TraceSink");
+        assertTrue(result.source().contains("support.TraceSink.record"));
+        Files.writeString(source, result.source());
+        Path helper = directory.resolve("support/TraceSink.java");
+        Files.createDirectories(helper.getParent());
+        Files.writeString(helper, "package support; public class TraceSink { public static void record(String k, int l, String n, Object v) {} }");
+        assertEquals(0, ToolProvider.getSystemJavaCompiler().run(null, null, null,
+                "--release", "17", "-d", directory.toString(), source.toString(), helper.toString()));
+        source = write("class TraceFixture { void selected(int support) {} }");
+        Path conflicted = source;
+        assertThrows(JavaSourceInstrumenter.InstrumentationException.class,
+                () -> new JavaSourceInstrumenter().instrument(conflicted, "TraceFixture", "selected", "support.TraceSink"));
+    }
+
+    @Test
+    void rejectsGeneratedSourcePathsIgnoringCase() throws Exception {
+        for (String component : java.util.List.of("GENERATED-SOURCES", "GeNeRaTeD-TeSt-SoUrCeS")) {
+            Path generated = directory.resolve("TARGET/" + component + "/TraceFixture.java");
+            Files.createDirectories(generated.getParent());
+            Files.writeString(generated, "class TraceFixture { void selected() {} }");
+            var failure = assertThrows(JavaSourceInstrumenter.InstrumentationException.class,
+                    () -> new JavaSourceInstrumenter().instrument(generated, "TraceFixture", "selected", "TraceSink"));
+            assertTrue(failure.getMessage().contains("Generated source"));
+        }
+    }
+
+    @Test
     void preservesCrLfAndUnicodeSourcePositions() throws Exception {
         String original = "// 文本\r\nclass TraceFixture {\r\n\tvoid selected() { String 文本 = \"😊\"; 文本 = \"ok\"; }\r\n}\r\n";
         var result = instrument(original);
