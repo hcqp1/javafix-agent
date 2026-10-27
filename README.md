@@ -16,14 +16,14 @@ AgentLoop（四阶段状态机：复现 → 定位 → 修复 → 验证）
    │  ▲
    │  └────── LlmClient（OpenAI 兼容协议，决定下一步动作）
    │
-   ├─► read_file / search_code / replace_in_file / write_file / run_tests / shell
-   ├─► MavenTestRunner（优先项目自带的 Maven Wrapper）
+   ├─► read_file / search_code / replace_in_file / write_file / run_tests / shell / diagnose_trace
+   ├─► MavenTestRunner（普通测试与诊断运行使用各自的超时）
    └─► 最终答复 + 逐步写入的运行记录
 ```
 
 ## 当前状态
 
-> 最后更新：2026-10-24
+> 最后更新：2026-10-27
 
 **已实现**
 
@@ -34,14 +34,13 @@ AgentLoop（四阶段状态机：复现 → 定位 → 修复 → 验证）
 - `MavenTestRunner`：优先使用项目自带的 Maven Wrapper（真实仓库会在 pom 里锁定 Maven 版本，
   系统那套 mvn 会因版本不符被 enforcer 挡下）；输出落盘到 `target/javafix-mvn-test.log`；
   默认超时 15 分钟（真实仓库构建很重），超时终止整棵进程树而不留下孤儿进程。
-- 工具：`read_file` / `search_code` / `replace_in_file` / `write_file` / `run_tests` / `shell`。文件工具的路径限制在仓库根目录内；
+- 工具：`read_file` / `search_code` / `replace_in_file` / `write_file` / `run_tests` / `shell` / `diagnose_trace`。文件工具的路径限制在仓库根目录内；
   `run_tests` 支持 `test` 参数只跑一个测试类，把一次验证从几十分钟收窄到几秒。
 - 协议加固：对模型输出做容错解析；运行轨迹不再回灌"可被模型模仿的格式"；
   观察结果限长，避免一次大文件读取污染后续上下文。
-- 测试失败时按用例优先展示前两条失败：各自保留测试名、断言或异常和有限的 Java 调用栈；
-  其余用例给出省略数，插件噪声后置，反馈总长度受限。完整 Maven 输出仍保存在目标仓库的
-  `target/javafix-mvn-test.log`。这是借鉴 TraceCoder 的有界诊断反馈，
-  不引入会改动被测代码的插桩。
+- `diagnose_trace`：定位阶段可在确认一个可疑方法和聚焦失败测试后，对项目副本运行受控的
+  Java 运行时诊断。它在临时副本中进行 AST 插桩，分别执行插桩前和插桩后的同一 Maven 测试，
+  第一版仅支持一个失败测试用例，只有两次该用例的身份与结果匹配时才返回带 `className#testName` 的轨迹；临时副本会在完成或失败时清理。工具不改原项目。
 - 同一任务内保留最近两次失败修复的方案、测试范围和失败反馈，下一轮修复会明确回顾这些尝试；
   达到修复轮数上限而测试仍失败时，返回未完成状态。验证还会核对复现时的测试范围、
   Java 测试源码和执行用例数，避免删掉失败测试后误报通过。
@@ -62,6 +61,22 @@ AgentLoop（四阶段状态机：复现 → 定位 → 修复 → 验证）
 - 自带 Bug 样本集的构建，以及修复成功率、定位准确率、成本的评测
 - Gradle 支持
 - Context Engineering 与同类方案的对比实验
+
+## 运行时诊断范围与限制
+
+- 要求 Java 17 和 Maven 项目；诊断总预算为 10 分钟，每次 Maven 最多 5 分钟，且不能超过剩余预算。Gradle 不支持。
+- 第一版的选择器必须恰好报告一个 FAILED/ERROR 测试用例；多方法、参数化或动态测试若报告多条用例会被拒绝，不提供多用例轨迹归属。
+- Surefire XML 的声明计数必须与直接 testcase 子节点一致，并且 Maven 必须输出唯一、匹配的完整汇总；缺失、模糊或中断的报告不返回轨迹。
+- 源码与单个 XML 报告各限 1 MiB；复制、解析和输出处理检查剩余预算。捕获器用独立状态文件记录写入失败；若状态文件和备用标记都无法写入，只会终止隔离 Maven/Surefire 进程树中的诊断测试 JVM（默认是 Surefire fork），不会终止 JavaFixAgent 宿主进程；Maven 父进程可能将子进程异常报告为 fork/build failure。任一失败信号写入成功时，普通捕获错误不会中断测试。
+- 模型必须先选定一个可疑 Java 方法和一个聚焦失败测试，再决定是否调用 `diagnose_trace`；
+  工具不会自动选择方法。诊断结果是未经信任的证据，模型应结合源码与测试判断。
+- 当前记录方法入口、局部变量声明、赋值、条件分支的 then/else 结果。字段读写、返回表达式、
+  循环迭代、异常和线程事件不在支持范围内；无法安全插桩的源码会跳过或拒绝。
+- 每次最多保留 500 个事件、每个值最多 160 个字符、最终输出最多 3500 个字符。
+- 一致性检查比较逐测试身份及其结果类别（通过、失败、错误、跳过）；这不保证断言细节、
+  执行顺序、测试环境或非确定性状态完全一致，因此轨迹仍可能受运行差异影响。
+- 诊断在临时副本中进行，并在工具退出时清理，不会在原工作树中改写插桩代码。
+- 不提供自动方法选择、Gradle 支持或跨任务记忆。
 
 ## 阶段目标
 
@@ -104,7 +119,7 @@ mvn -q exec:java "-Dexec.args=D:\some-java-project 定时消息偶尔丢失，�
   复现阶段拦截文件编辑工具对生产代码的修改。通用 `shell` 命令目前不受这项拦截约束。
 - **优先使用项目自带的 Maven Wrapper**。真实仓库会锁定 Maven 版本，系统 mvn 会失败。
 - **先只支持 Maven**。Gradle 等 Maven 链路跑通、评测有数据之后再考虑。
-- **生产依赖只有一个**：Jackson，用来处理模型接口的 JSON。HTTP 用 JDK 自带的 `HttpClient`。
+- **生产依赖**：Jackson 用于模型接口 JSON，JavaParser 用于受限源码插桩。HTTP 使用 JDK 自带的 `HttpClient`。
 
 ## 项目愿景
 
