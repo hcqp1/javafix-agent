@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.javafix.agent.core.TestResult;
 
 import java.io.DataInputStream;
+import java.io.Closeable;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -15,9 +16,11 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 /** Compares isolated test runs before exposing diagnostic-only runtime evidence. */
 public final class TraceDiagnosticTool extends ProjectTool {
@@ -26,21 +29,33 @@ public final class TraceDiagnosticTool extends ProjectTool {
     private static final int OBSERVATION_LIMIT = 3500;
     private static final Set<String> EVENT_KINDS = Set.of(
             "METHOD_ENTRY", "LOCAL_DECLARATION", "ASSIGNMENT", "BRANCH_THEN", "BRANCH_ELSE");
+    private static final Pattern COMPLETED_TEST_TOTAL = Pattern.compile(
+            "(?m)^(?:\\[(?:INFO|WARNING|ERROR)]\\s*)?Tests run:\\s*(\\d+),\\s*Failures:\\s*\\d+,"
+                    + "\\s*Errors:\\s*\\d+,\\s*Skipped:\\s*\\d+\\s*$");
     private static final ObjectMapper JSON = new ObjectMapper()
             .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     private final DiagnosticTestRunner runner;
     private final Duration deadline;
+    private final DiagnosticWorkspaceFactory workspaces;
 
     public TraceDiagnosticTool(MavenTestRunner runner, Path root) {
         this(root, runner::run, Duration.ofMinutes(10));
     }
 
     TraceDiagnosticTool(Path root, DiagnosticTestRunner runner, Duration deadline) {
+        this(root, runner, deadline, project -> {
+            DiagnosticWorkspace workspace = DiagnosticWorkspace.create(project);
+            return new DiagnosticWorkspaceOwner(workspace, workspace::close);
+        });
+    }
+
+    TraceDiagnosticTool(Path root, DiagnosticTestRunner runner, Duration deadline, DiagnosticWorkspaceFactory workspaces) {
         super(root);
         if (deadline.isNegative() || deadline.isZero()) throw new IllegalArgumentException("deadline must be positive");
         this.runner = runner;
         this.deadline = deadline;
+        this.workspaces = workspaces;
     }
 
     @Override public String name() { return "diagnose_trace"; }
@@ -83,15 +98,15 @@ public final class TraceDiagnosticTool extends ProjectTool {
             return failure("invalid source path", e.getMessage());
         }
 
-        DiagnosticWorkspace workspace;
+        DiagnosticWorkspaceOwner owner;
         try {
-            workspace = DiagnosticWorkspace.create(root);
+            owner = workspaces.create(root);
         } catch (IOException e) {
             return failure(e.getSuppressed().length > 0 ? "workspace cleanup failure" : "workspace creation failure", e.getMessage());
         }
-        try (workspace) {
+        try (owner) {
             try {
-                return diagnose(workspace, source, arguments, started);
+                return diagnose(owner.workspace(), source, arguments, started);
             } catch (JavaSourceInstrumenter.InstrumentationException e) {
                 return failure("source parse ambiguity or unsupported instrumentation", e.getMessage());
             } catch (IOException e) {
@@ -124,7 +139,7 @@ public final class TraceDiagnosticTool extends ProjectTool {
         if (expired(started)) return failure("overall deadline", "Baseline exhausted the diagnostic budget");
         TestOutcomeSignature before;
         try {
-            before = readSignature(workspace.baselineRoot(), "baseline");
+            before = readSignature(workspace.baselineRoot(), "baseline", baseline);
         } catch (IOException e) {
             return e.getMessage();
         }
@@ -147,7 +162,7 @@ public final class TraceDiagnosticTool extends ProjectTool {
         if (expired(started)) return failure("overall deadline", "Instrumented run exhausted the diagnostic budget");
         TestOutcomeSignature after;
         try {
-            after = readSignature(workspace.instrumentedRoot(), "instrumented");
+            after = readSignature(workspace.instrumentedRoot(), "instrumented", traced);
         } catch (IOException e) {
             return e.getMessage();
         }
@@ -166,6 +181,12 @@ public final class TraceDiagnosticTool extends ProjectTool {
     private static String runFailure(String stage, TestResult result) {
         if (result.getExitCode() == TestResult.EXIT_TIMEOUT) return failure(stage + " timeout", "Tests did not finish");
         if (result.getExitCode() == TestResult.EXIT_START_FAILURE) return failure(stage + " execution failure", "Tests did not start or were interrupted");
+        String output = output(result).toLowerCase(Locale.ROOT);
+        for (String marker : List.of("the forked vm terminated without properly saying goodbye",
+                "there was an error in the forked process", "surefirebooterforkexception",
+                "error occurred in starting fork", "there was a timeout in the fork")) {
+            if (output.contains(marker)) return failure(stage + " infrastructure failure", "Surefire fork did not complete normally");
+        }
         if (result.getExitCode() < 0 || result.getExitCode() > 1
                 || (result.getStdout() != null && result.getStdout().contains("COMPILATION ERROR"))) {
             return failure(stage + " build failure", "No trustworthy completed test run");
@@ -173,19 +194,50 @@ public final class TraceDiagnosticTool extends ProjectTool {
         return null;
     }
 
-    private static TestOutcomeSignature readSignature(Path project, String stage) throws IOException {
+    private static String output(TestResult result) {
+        return (result.getStdout() == null ? "" : result.getStdout()) + "\n"
+                + (result.getStderr() == null ? "" : result.getStderr());
+    }
+
+    private static TestOutcomeSignature readSignature(Path project, String stage, TestResult result) throws IOException {
         Path reports = project.resolve("target/surefire-reports");
+        Path realProject = project.toRealPath();
+        for (Path component = reports; component != null && component.startsWith(project); component = component.getParent()) {
+            validateReportPath(component, realProject, stage);
+        }
         boolean hasReports = false;
-        if (Files.isDirectory(reports)) {
+        if (Files.isDirectory(reports, LinkOption.NOFOLLOW_LINKS)) {
             try (var files = Files.walk(reports)) {
-                hasReports = files.anyMatch(path -> Files.isRegularFile(path) && path.toString().endsWith(".xml"));
+                for (Path path : files.toList()) {
+                    validateReportPath(path, realProject, stage);
+                    if (path.toString().endsWith(".dump") || path.toString().endsWith(".dumpstream")) {
+                        throw new IOException(failure(stage + " infrastructure failure", "Surefire dump artifact found"));
+                    }
+                    if (Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) && path.toString().endsWith(".xml")) hasReports = true;
+                }
             }
         }
         if (!hasReports) throw new IOException(failure(stage + " missing reports", "No Surefire XML reports were produced"));
         try {
-            return TestOutcomeSignature.read(reports);
+            TestOutcomeSignature signature = TestOutcomeSignature.read(reports);
+            var totals = COMPLETED_TEST_TOTAL.matcher(output(result));
+            if (totals.find()) {
+                // Per-class lines have a timing/name suffix; only an unadorned aggregate is comparable.
+                String count = totals.group(1);
+                if (!count.equals(Integer.toString(signature.entries().size())) || totals.find()) {
+                    throw new IOException(failure(stage + " incomplete reports", "Completed Maven total is ambiguous or differs from XML testcase count"));
+                }
+            }
+            return signature;
         } catch (TestOutcomeSignature.ParseException e) {
             throw new IOException(failure(stage + " report parse ambiguity", e.getMessage()), e);
+        }
+    }
+
+    private static void validateReportPath(Path path, Path realProject, String stage) throws IOException {
+        if (Files.isSymbolicLink(path) || (Files.exists(path, LinkOption.NOFOLLOW_LINKS)
+                && !path.toRealPath().startsWith(realProject))) {
+            throw new IOException(failure(stage + " unsafe reports", "Linked or external Surefire reports are unsupported"));
         }
     }
 
@@ -269,4 +321,13 @@ public final class TraceDiagnosticTool extends ProjectTool {
 @FunctionalInterface
 interface DiagnosticTestRunner {
     TestResult run(Path project, String selector, Map<String, String> environment) throws IOException;
+}
+
+@FunctionalInterface
+interface DiagnosticWorkspaceFactory {
+    DiagnosticWorkspaceOwner create(Path project) throws IOException;
+}
+
+record DiagnosticWorkspaceOwner(DiagnosticWorkspace workspace, Closeable cleanup) implements AutoCloseable {
+    @Override public void close() throws IOException { cleanup.close(); }
 }

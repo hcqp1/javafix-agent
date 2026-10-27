@@ -19,8 +19,10 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class TraceDiagnosticToolTest {
     private static final String SOURCE = "src/main/java/example/Calculator.java";
@@ -64,7 +66,8 @@ class TraceDiagnosticToolTest {
                 <dependencies><dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId>
                 <version>5.10.2</version><scope>test</scope></dependency></dependencies>
                 <build><plugins><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId>
-                <version>3.2.5</version></plugin></plugins></build></project>
+                <version>3.2.5</version><configuration><useManifestOnlyJar>false</useManifestOnlyJar></configuration>
+                </plugin></plugins></build></project>
                 """);
         Path test = root.resolve("src/test/java/example/CalculatorTest.java");
         Files.createDirectories(test.getParent());
@@ -77,8 +80,22 @@ class TraceDiagnosticToolTest {
                 }
                 """);
         MavenTestRunner maven = new MavenTestRunner(Duration.ofSeconds(60));
-        String result = tool(maven::run).execute(ARGUMENTS);
-        assertTrue(result.contains("per-test parity matched"), result);
+        StringBuilder diagnostics = new StringBuilder();
+        String result = tool((p, s, e) -> {
+            TestResult run = maven.run(p, s, e);
+            diagnostics.append(run.getStdout()).append(run.getStderr());
+            Path reports = p.resolve("target/surefire-reports");
+            if (Files.isDirectory(reports)) {
+                try (var files = Files.list(reports)) {
+                    for (Path file : files.filter(path -> path.toString().endsWith(".dump")
+                            || path.toString().endsWith(".dumpstream")).toList()) {
+                        diagnostics.append("\n").append(file.getFileName()).append(":\n").append(Files.readString(file));
+                    }
+                }
+            }
+            return run;
+        }).execute(ARGUMENTS);
+        assertTrue(result.contains("per-test parity matched"), result + "\n" + diagnostics);
         assertTrue(result.contains("Trace:"), result);
         assertTrue(result.contains("LOCAL_DECLARATION"), result);
         assertTrue(result.contains("BRANCH_THEN"), result);
@@ -156,6 +173,107 @@ class TraceDiagnosticToolTest {
         assertEquals(1, copies.size());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"The forked VM terminated without properly saying goodbye",
+            "There was an error in the forked process", "SurefireBooterForkException"})
+    void rejectsPartialReportsAfterForkFailure(String marker) {
+        for (String stage : List.of("baseline", "instrumented")) {
+            for (boolean stderr : List.of(false, true)) {
+                String result = tool((p, s, e) -> {
+                    report(p, "completedA", "failure");
+                    if (!e.isEmpty()) trace(e, 1, 0);
+                    boolean crash = stage.equals(e.isEmpty() ? "baseline" : "instrumented");
+                    return new TestResult(1, failed().getStdout() + (crash && !stderr ? "\n" + marker : ""),
+                            crash && stderr ? marker : "");
+                }).execute(ARGUMENTS);
+                noTrace(result, stage + " infrastructure failure");
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"jvmRun1.dump", "jvmRun1.dumpstream"})
+    void rejectsForkDumpArtifactsEvenWithMatchingXml(String dump) {
+        for (String stage : List.of("baseline", "instrumented")) {
+            String result = tool((p, s, e) -> {
+                report(p, "completedA", "failure");
+                if (!e.isEmpty()) trace(e, 1, 0);
+                if (stage.equals(e.isEmpty() ? "baseline" : "instrumented")) {
+                    Files.writeString(p.resolve("target/surefire-reports").resolve(dump), "incomplete fork");
+                }
+                return failed();
+            }).execute(ARGUMENTS);
+            noTrace(result, stage + " infrastructure failure");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"baseline", "instrumented"})
+    void rejectsCompletedTestTotalThatExceedsXmlCount(String stage) {
+        String result = tool((p, s, e) -> {
+            report(p, "completedA", "failure");
+            if (!e.isEmpty()) trace(e, 1, 0);
+            int total = stage.equals(e.isEmpty() ? "baseline" : "instrumented") ? 2 : 1;
+            return new TestResult(1, "[ERROR] Tests run: " + total + ", Failures: 1, Errors: 0, Skipped: 0\nBUILD FAILURE", "");
+        }).execute(ARGUMENTS);
+        noTrace(result, stage + " incomplete reports");
+    }
+
+    @Test
+    void comparesOnlyUnambiguousAggregateCounts() {
+        String aggregate = "[ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0\n";
+        DiagnosticTestRunner completed = (p, s, e) -> {
+            report(p, "adds", "failure");
+            if (!e.isEmpty()) trace(e, 1, 0);
+            return new TestResult(1, aggregate.stripTrailing()
+                    + ", Time elapsed: 0.1 s <<< FAILURE! -- in example.CalculatorTest\n" + aggregate, "");
+        };
+        String result = tool(completed).execute(ARGUMENTS);
+        assertTrue(result.contains("Trace:"), result);
+        noTrace(tool((p, s, e) -> {
+            report(p, "adds", "failure");
+            if (!e.isEmpty()) trace(e, 1, 0);
+            return new TestResult(1, aggregate + aggregate, "");
+        }).execute(ARGUMENTS), "baseline incomplete reports");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"report-file", "reports-directory", "target-directory"})
+    void rejectsLinkedReportsOutsideTemporaryProject(String linkKind) throws Exception {
+        Path probe = root.resolve("link-probe");
+        try {
+            Files.createSymbolicLink(probe, root.resolve(SOURCE));
+        } catch (IOException | UnsupportedOperationException | SecurityException unavailable) {
+            assumeTrue(false, "Symbolic links unavailable: " + unavailable);
+        }
+        Files.delete(probe);
+        Path external = root.resolve("stale");
+        report(external, "adds", "failure");
+        for (String stage : List.of("baseline", "instrumented")) {
+            String result = tool((p, s, e) -> {
+                if (stage.equals(e.isEmpty() ? "baseline" : "instrumented")) {
+                    Path reports = p.resolve("target/surefire-reports");
+                    if (linkKind.equals("target-directory")) {
+                        Files.deleteIfExists(p.resolve("target"));
+                        Files.createSymbolicLink(p.resolve("target"), external.resolve("target"));
+                    } else if (linkKind.equals("reports-directory")) {
+                        Files.createDirectories(reports.getParent());
+                        Files.createSymbolicLink(reports, external.resolve("target/surefire-reports"));
+                    } else {
+                        Files.createDirectories(reports);
+                        Files.createSymbolicLink(reports.resolve("TEST-fixture.xml"),
+                                external.resolve("target/surefire-reports/TEST-fixture.xml"));
+                    }
+                } else {
+                    report(p, "adds", "failure");
+                }
+                if (!e.isEmpty()) trace(e, 1, 0);
+                return failed();
+            }).execute(ARGUMENTS);
+            noTrace(result, stage + " unsafe reports");
+        }
+    }
+
     @Test
     void distinguishesBuildFailureFromReportAmbiguity() {
         noTrace(tool((p, s, e) -> new TestResult(1, "COMPILATION ERROR", "")).execute(ARGUMENTS),
@@ -216,6 +334,49 @@ class TraceDiagnosticToolTest {
         Files.writeString(root.resolve(SOURCE), "package example; class Calculator { int add(int x){return x;} int add(){return 1;} }");
         originalHash = hash();
         noTrace(tool((p, s, e) -> fail("must not launch Maven")).execute(ARGUMENTS), "Ambiguous method");
+    }
+
+    @Test
+    void cleanupFailureOverridesOtherwiseSuccessfulTrace() {
+        AtomicBoolean closed = new AtomicBoolean();
+        int[] runs = {0};
+        TraceDiagnosticTool tool = new TraceDiagnosticTool(root, (p, s, e) -> {
+            runs[0]++;
+            report(p, "adds", "failure");
+            if (!e.isEmpty()) trace(e, 1, 0);
+            return failed();
+        }, Duration.ofMinutes(1), project -> {
+            DiagnosticWorkspace workspace = DiagnosticWorkspace.create(project);
+            copies.add(workspace.baselineRoot());
+            copies.add(workspace.instrumentedRoot());
+            return new DiagnosticWorkspaceOwner(workspace, () -> {
+                workspace.close();
+                closed.set(true);
+                throw new IOException("injected close failure");
+            });
+        });
+        noTrace(tool.execute(ARGUMENTS), "workspace cleanup failure");
+        assertEquals(2, runs[0], "both matching test runs must complete before cleanup fails");
+        assertTrue(closed.get(), "owned cleanup must execute");
+    }
+
+    @Test
+    void closesWorkspaceWhenInstrumentationFailsBeforeRunnerLaunch() throws Exception {
+        Files.writeString(root.resolve(SOURCE), "package example; class Calculator { int add(int x){return x;} int add(){return 1;} }");
+        originalHash = hash();
+        AtomicBoolean closed = new AtomicBoolean();
+        TraceDiagnosticTool tool = new TraceDiagnosticTool(root, (p, s, e) -> fail("must not launch Maven"),
+                Duration.ofMinutes(1), project -> {
+            DiagnosticWorkspace workspace = DiagnosticWorkspace.create(project);
+            copies.add(workspace.baselineRoot());
+            copies.add(workspace.instrumentedRoot());
+            return new DiagnosticWorkspaceOwner(workspace, () -> {
+                workspace.close();
+                closed.set(true);
+            });
+        });
+        noTrace(tool.execute(ARGUMENTS), "Ambiguous method");
+        assertTrue(closed.get(), "instrumentation failure must close its workspace");
     }
 
     @Test
