@@ -10,12 +10,14 @@ import com.javafix.agent.tool.RunTestsTool;
 import com.javafix.agent.tool.SearchCodeTool;
 import com.javafix.agent.tool.ShellTool;
 import com.javafix.agent.tool.Tool;
+import com.javafix.agent.tool.TraceDiagnosticTool;
 import com.javafix.agent.tool.WriteFileTool;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
@@ -76,14 +78,7 @@ public class Main {
 
         LlmClient llmClient = new OpenAiCompatibleLlmClient(baseUrl, apiKey, model);
 
-        List<Tool> tools = List.of(
-                new ReadFileTool(project),
-                new ReplaceInFileTool(project),
-                new SearchCodeTool(project),
-                new WriteFileTool(project),
-                new RunTestsTool(new MavenTestRunner(), project),
-                new ShellTool(project)
-        );
+        List<Tool> tools = createTools(project);
 
         AgentLoop loop = new AgentLoop(llmClient, tools);
         loop.onRecord(journal::appendStep);
@@ -126,6 +121,18 @@ public class Main {
 
             System.out.println("\n完整轨迹已逐步写入：" + journal.path());
         }
+    }
+
+    static List<Tool> createTools(Path project) {
+        return List.of(
+                new ReadFileTool(project),
+                new ReplaceInFileTool(project),
+                new SearchCodeTool(project),
+                new WriteFileTool(project),
+                new RunTestsTool(new MavenTestRunner(), project),
+                new ShellTool(project),
+                new TraceDiagnosticTool(new MavenTestRunner(Duration.ofMinutes(5)), project)
+        );
     }
 
     /** 把一条轨迹压成一行：阶段 + 这一步调用了什么。 */

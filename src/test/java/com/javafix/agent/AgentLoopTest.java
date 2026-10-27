@@ -8,6 +8,7 @@ import com.javafix.agent.tool.ReadFileTool;
 import com.javafix.agent.tool.ReplaceInFileTool;
 import com.javafix.agent.tool.RunTestsTool;
 import com.javafix.agent.tool.SearchCodeTool;
+import com.javafix.agent.tool.TraceDiagnosticTool;
 import com.javafix.agent.tool.Tool;
 import com.javafix.agent.tool.WriteFileTool;
 import org.junit.jupiter.api.Test;
@@ -29,6 +30,24 @@ class AgentLoopTest {
 
     @TempDir
     Path project;
+
+    @Test
+    void localizationPromptOffersBoundedTraceOnlyAfterMethodAndFocusedTestAreKnown() {
+        TestRunner failingTests = path -> new TestResult(1,
+                "Tests run: 1, Failures: 1, Errors: 0, Skipped: 0", "");
+        ScriptedLlmClient llm = new ScriptedLlmClient(
+                "TOOL: run_tests\n", "FINAL: 先确认可疑方法和聚焦失败测试\n");
+        AgentLoop loop = new AgentLoop(llm, List.of(new RunTestsTool(failingTests, project),
+                new TraceDiagnosticTool(new MavenTestRunner(), project)), 2);
+
+        loop.run("测试失败");
+
+        String localizationPrompt = llm.prompts().get(1);
+        assertTrue(localizationPrompt.contains("diagnose_trace"), localizationPrompt);
+        assertTrue(localizationPrompt.contains("聚焦"), localizationPrompt);
+        assertTrue(localizationPrompt.contains("可疑方法"), localizationPrompt);
+        assertTrue(localizationPrompt.contains("未经信任"), localizationPrompt);
+    }
 
     @Test
     void shouldRunThroughAllPhasesAndFixTheBug() throws IOException {
