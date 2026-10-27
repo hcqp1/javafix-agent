@@ -78,6 +78,16 @@ public class MavenTestRunner implements TestRunner {
 
     public TestResult run(Path projectPath, String testSelector, Map<String, String> environmentOverrides) {
 
+        return run(projectPath, testSelector, environmentOverrides, timeout);
+    }
+
+    /** The caller may shorten, but never extend, the configured process limit. */
+    public TestResult run(Path projectPath, String testSelector, Map<String, String> environmentOverrides,
+                          Duration timeoutOverride) {
+        Duration runTimeout = timeoutOverride.compareTo(timeout) < 0 ? timeoutOverride : timeout;
+        if (runTimeout.isZero() || runTimeout.isNegative()) {
+            return new TestResult(TestResult.EXIT_TIMEOUT, "", "No Maven execution budget remains");
+        }
         if (!Files.isDirectory(projectPath)) {
             return new TestResult(
                     TestResult.EXIT_START_FAILURE,
@@ -90,14 +100,14 @@ public class MavenTestRunner implements TestRunner {
 
         try {
             ProcessRunner.Result result =
-                    ProcessRunner.run(mavenCommand(projectPath, testSelector), projectPath, log, timeout,
+                    ProcessRunner.run(mavenCommand(projectPath, testSelector), projectPath, log, runTimeout,
                             environmentOverrides);
 
             if (result.timedOut()) {
                 return new TestResult(
                         TestResult.EXIT_TIMEOUT,
                         result.output(),
-                        "mvn test 超过 " + timeout.toMinutes() + " 分钟仍未结束，已经终止。"
+                        "mvn test 超过 " + runTimeout.toMinutes() + " 分钟仍未结束，已经终止。"
                                 + "如果是整个模块一起跑太慢，用 run_tests 的 test 参数"
                                 + "只跑相关的测试类（例如 test=SomeTest）；也可以缩小范围再试。"
                                 + "项目路径：" + projectPath

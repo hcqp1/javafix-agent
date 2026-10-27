@@ -21,6 +21,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
+import java.util.function.LongSupplier;
 
 /** Compares isolated test runs before exposing diagnostic-only runtime evidence. */
 public final class TraceDiagnosticTool extends ProjectTool {
@@ -38,36 +39,46 @@ public final class TraceDiagnosticTool extends ProjectTool {
     private final DiagnosticTestRunner runner;
     private final Duration deadline;
     private final DiagnosticWorkspaceFactory workspaces;
+    private final LongSupplier nanoTime;
 
     public TraceDiagnosticTool(MavenTestRunner runner, Path root) {
         this(root, runner::run, Duration.ofMinutes(10));
     }
 
     TraceDiagnosticTool(Path root, DiagnosticTestRunner runner, Duration deadline) {
-        this(root, runner, deadline, project -> {
-            DiagnosticWorkspace workspace = DiagnosticWorkspace.create(project);
+        this(root, runner, deadline, System::nanoTime);
+    }
+
+    TraceDiagnosticTool(Path root, DiagnosticTestRunner runner, Duration deadline, LongSupplier nanoTime) {
+        this(root, runner, deadline, (project, checkpoint) -> {
+            DiagnosticWorkspace workspace = DiagnosticWorkspace.create(project, checkpoint);
             return new DiagnosticWorkspaceOwner(workspace, workspace::close);
-        });
+        }, nanoTime);
     }
 
     TraceDiagnosticTool(Path root, DiagnosticTestRunner runner, Duration deadline, DiagnosticWorkspaceFactory workspaces) {
+        this(root, runner, deadline, workspaces, System::nanoTime);
+    }
+
+    TraceDiagnosticTool(Path root, DiagnosticTestRunner runner, Duration deadline, DiagnosticWorkspaceFactory workspaces, LongSupplier nanoTime) {
         super(root);
         if (deadline.isNegative() || deadline.isZero()) throw new IllegalArgumentException("deadline must be positive");
         this.runner = runner;
         this.deadline = deadline;
         this.workspaces = workspaces;
+        this.nanoTime = nanoTime;
     }
 
     @Override public String name() { return "diagnose_trace"; }
 
     @Override public String description() {
         return "Run a focused failing Maven test twice in disposable copies and return bounded runtime evidence only"
-                + " when all per-test identities and outcomes match. Required arguments: path (Java source), class,"
+                + " when exactly one failing test case has the same identity and outcome in both runs. Required arguments: path (Java source), class,"
                 + " method (unambiguous name), test (focused selector, e.g. CalculatorTest#adds).";
     }
 
     @Override public String execute(Map<String, String> arguments) {
-        long started = System.nanoTime();
+        long started = nanoTime.getAsLong();
         try {
             rejectUnknownArguments(arguments, "path", "class", "method", "test");
             for (String required : List.of("path", "class", "method", "test")) {
@@ -100,17 +111,25 @@ public final class TraceDiagnosticTool extends ProjectTool {
 
         DiagnosticWorkspaceOwner owner;
         try {
-            owner = workspaces.create(root);
+            checkDeadline(started);
+            owner = workspaces.create(root, () -> checkDeadline(started));
+        } catch (DeadlineExceeded e) {
+            return failure(e.getSuppressed().length > 0 ? "workspace cleanup failure" : "overall deadline", e.getMessage());
         } catch (IOException e) {
             return failure(e.getSuppressed().length > 0 ? "workspace cleanup failure" : "workspace creation failure", e.getMessage());
         }
         try (owner) {
             try {
-                return diagnose(owner.workspace(), source, arguments, started);
+                checkDeadline(started);
+                String result = diagnose(owner.workspace(), source, arguments, started);
+                checkDeadline(started);
+                return result;
             } catch (JavaSourceInstrumenter.InstrumentationException e) {
                 return failure("source parse ambiguity or unsupported instrumentation", e.getMessage());
             } catch (IOException e) {
                 return failure("diagnostic I/O failure", e.getMessage());
+            } catch (DeadlineExceeded e) {
+                return failure("overall deadline", e.getMessage());
             } catch (RuntimeException e) {
                 return failure("diagnostic execution failure", e.getMessage());
             }
@@ -127,25 +146,31 @@ public final class TraceDiagnosticTool extends ProjectTool {
         String method = arguments.get("class") + "." + arguments.get("method");
         String helper = "JavafixTrace" + UUID.randomUUID().toString().replace("-", "");
         Path temporarySource = workspace.instrumentedRoot().resolve(relative);
+        checkDeadline(started);
         var instrumented = new JavaSourceInstrumenter().instrument(temporarySource,
                 arguments.get("class"), arguments.get("method"), helper);
+        checkDeadline(started);
         Files.writeString(temporarySource, instrumented.source() + "\n"
                 + TraceEventWriter.helperSource(helper, sourceName, method, EVENT_LIMIT, VALUE_LIMIT));
 
         if (expired(started)) return failure("overall deadline", "No time remains for baseline tests");
-        TestResult baseline = runner.run(workspace.baselineRoot(), arguments.get("test"), Map.of());
+        TestResult baseline = runner.run(workspace.baselineRoot(), arguments.get("test"), Map.of(), remainingBudget(started));
         String runFailure = runFailure("baseline", baseline);
         if (runFailure != null) return runFailure;
         if (expired(started)) return failure("overall deadline", "Baseline exhausted the diagnostic budget");
         TestOutcomeSignature before;
         try {
-            before = readSignature(workspace.baselineRoot(), "baseline", baseline);
+            before = readSignature(workspace.baselineRoot(), "baseline", baseline, () -> checkDeadline(started));
         } catch (IOException e) {
             return e.getMessage();
         }
+        checkDeadline(started);
+        if (before.entries().size() != 1) {
+            return failure("select exactly one failing test case", "The selector must report exactly one testcase");
+        }
         if (before.entries().stream().noneMatch(entry -> entry.outcome() == TestOutcomeSignature.Outcome.FAILED
                 || entry.outcome() == TestOutcomeSignature.Outcome.ERROR)) {
-            return failure("baseline has no FAILED/ERROR tests", "Select a reproducibly failing test");
+            return failure("baseline has no FAILED/ERROR tests", "select exactly one failing test case");
         }
         if (baseline.isSuccess()) return failure("baseline build failure", "Exit status contradicts failing reports");
 
@@ -154,29 +179,48 @@ public final class TraceDiagnosticTool extends ProjectTool {
         Path traceFile = target.resolve("javafix-trace-" + UUID.randomUUID() + ".jsonl");
         Files.deleteIfExists(traceFile);
         Files.deleteIfExists(Path.of(traceFile + ".state"));
+        Files.deleteIfExists(Path.of(traceFile + ".failed"));
         if (expired(started)) return failure("overall deadline", "No time remains for instrumented tests");
         TestResult traced = runner.run(workspace.instrumentedRoot(), arguments.get("test"),
-                Map.of("JAVAFIX_TRACE_FILE", traceFile.toString()));
+                Map.of("JAVAFIX_TRACE_FILE", traceFile.toString()), remainingBudget(started));
         runFailure = runFailure("instrumented", traced);
         if (runFailure != null) return runFailure;
         if (expired(started)) return failure("overall deadline", "Instrumented run exhausted the diagnostic budget");
         TestOutcomeSignature after;
         try {
-            after = readSignature(workspace.instrumentedRoot(), "instrumented", traced);
+            after = readSignature(workspace.instrumentedRoot(), "instrumented", traced, () -> checkDeadline(started));
         } catch (IOException e) {
             return e.getMessage();
         }
+        checkDeadline(started);
         if (!before.matches(after)) return failure("per-test parity mismatch", "Test identities or outcomes changed; trace discarded");
         if (traced.isSuccess()) return failure("instrumented build failure", "Exit status contradicts failing reports");
         try {
+            checkDeadline(started);
             Trace trace = readTrace(traceFile, sourceName, method);
-            return summarize(trace, before.entries().size(), sourceName, method, instrumented.skippedProbes().size());
+            checkDeadline(started);
+            return summarize(trace, before.entries().get(0), sourceName, method, instrumented.skippedProbes().size());
         } catch (IOException | IllegalArgumentException e) {
             return failure("trace unavailable", e.getMessage());
         }
     }
 
-    private boolean expired(long started) { return System.nanoTime() - started >= deadline.toNanos(); }
+    private boolean expired(long started) { return nanoTime.getAsLong() - started >= deadline.toNanos(); }
+
+    private Duration remainingBudget(long started) {
+        long remaining = deadline.toNanos() - (nanoTime.getAsLong() - started);
+        if (remaining <= 0) throw new DeadlineExceeded();
+        return Duration.ofNanos(remaining).compareTo(Duration.ofMinutes(5)) < 0
+                ? Duration.ofNanos(remaining) : Duration.ofMinutes(5);
+    }
+
+    private void checkDeadline(long started) {
+        if (expired(started)) throw new DeadlineExceeded();
+    }
+
+    private static final class DeadlineExceeded extends RuntimeException {
+        DeadlineExceeded() { super("Diagnostic time budget exhausted"); }
+    }
 
     private static String runFailure(String stage, TestResult result) {
         if (result.getExitCode() == TestResult.EXIT_TIMEOUT) return failure(stage + " timeout", "Tests did not finish");
@@ -199,7 +243,8 @@ public final class TraceDiagnosticTool extends ProjectTool {
                 + (result.getStderr() == null ? "" : result.getStderr());
     }
 
-    private static TestOutcomeSignature readSignature(Path project, String stage, TestResult result) throws IOException {
+    private static TestOutcomeSignature readSignature(Path project, String stage, TestResult result, Runnable checkpoint) throws IOException {
+        checkpoint.run();
         Path reports = project.resolve("target/surefire-reports");
         Path realProject = project.toRealPath();
         for (Path component = reports; component != null && component.startsWith(project); component = component.getParent()) {
@@ -208,7 +253,9 @@ public final class TraceDiagnosticTool extends ProjectTool {
         boolean hasReports = false;
         if (Files.isDirectory(reports, LinkOption.NOFOLLOW_LINKS)) {
             try (var files = Files.walk(reports)) {
-                for (Path path : files.toList()) {
+                for (var iterator = files.iterator(); iterator.hasNext();) {
+                    checkpoint.run();
+                    Path path = iterator.next();
                     validateReportPath(path, realProject, stage);
                     if (path.toString().endsWith(".dump") || path.toString().endsWith(".dumpstream")) {
                         throw new IOException(failure(stage + " infrastructure failure", "Surefire dump artifact found"));
@@ -219,9 +266,12 @@ public final class TraceDiagnosticTool extends ProjectTool {
         }
         if (!hasReports) throw new IOException(failure(stage + " missing reports", "No Surefire XML reports were produced"));
         try {
-            TestOutcomeSignature signature = TestOutcomeSignature.read(reports);
+            TestOutcomeSignature signature = TestOutcomeSignature.read(reports, checkpoint);
+            checkpoint.run();
             var totals = COMPLETED_TEST_TOTAL.matcher(output(result));
-            if (totals.find()) {
+            if (!totals.find()) {
+                throw new IOException(failure(stage + " incomplete reports", "Missing recognized completed Maven aggregate"));
+            } else {
                 // Per-class lines have a timing/name suffix; only an unadorned aggregate is comparable.
                 String count = totals.group(1);
                 if (!count.equals(Integer.toString(signature.entries().size())) || totals.find()) {
@@ -242,6 +292,9 @@ public final class TraceDiagnosticTool extends ProjectTool {
     }
 
     private static Trace readTrace(Path file, String source, String method) throws IOException {
+        if (Files.exists(Path.of(file + ".failed"), LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("capture failed; trace discarded");
+        }
         if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS) || Files.size(file) > 1024 * 1024) {
             throw new IOException("Missing or oversized trace");
         }
@@ -291,10 +344,11 @@ public final class TraceDiagnosticTool extends ProjectTool {
         return new Trace(events, omitted);
     }
 
-    private static String summarize(Trace trace, int tests, String source, String method, int skipped) {
-        StringBuilder result = new StringBuilder("Diagnostic success: per-test parity matched (" + tests + " tests). ");
+    private static String summarize(Trace trace, TestOutcomeSignature.Entry test, String source, String method, int skipped) {
+        StringBuilder result = new StringBuilder("Diagnostic success: per-test parity matched (1 test). ");
         result.append(trace.events().size()).append(" events captured; ").append(skipped).append(" unsupported probes skipped.\n");
         if (trace.omitted() > 0) result.append("trace overflow: ").append(trace.omitted()).append(" events omitted.\n");
+        result.append("Test: ").append(shorten(test.className() + "#" + test.testName(), 300)).append('\n');
         result.append("Trace: ").append(shorten(source, 180)).append(" :: ").append(shorten(method, 180)).append('\n');
         int shown = 0;
         for (JsonNode event : trace.events()) {
@@ -320,12 +374,12 @@ public final class TraceDiagnosticTool extends ProjectTool {
 
 @FunctionalInterface
 interface DiagnosticTestRunner {
-    TestResult run(Path project, String selector, Map<String, String> environment) throws IOException;
+    TestResult run(Path project, String selector, Map<String, String> environment, Duration timeout) throws IOException;
 }
 
 @FunctionalInterface
 interface DiagnosticWorkspaceFactory {
-    DiagnosticWorkspaceOwner create(Path project) throws IOException;
+    DiagnosticWorkspaceOwner create(Path project, Runnable checkpoint) throws IOException;
 }
 
 record DiagnosticWorkspaceOwner(DiagnosticWorkspace workspace, Closeable cleanup) implements AutoCloseable {

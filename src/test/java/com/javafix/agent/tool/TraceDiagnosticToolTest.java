@@ -81,8 +81,8 @@ class TraceDiagnosticToolTest {
                 """);
         MavenTestRunner maven = new MavenTestRunner(Duration.ofSeconds(60));
         StringBuilder diagnostics = new StringBuilder();
-        String result = tool((p, s, e) -> {
-            TestResult run = maven.run(p, s, e);
+        String result = tool((p, s, e, timeout) -> {
+            TestResult run = maven.run(p, s, e, timeout);
             diagnostics.append(run.getStdout()).append(run.getStderr());
             Path reports = p.resolve("target/surefire-reports");
             if (Files.isDirectory(reports)) {
@@ -106,7 +106,7 @@ class TraceDiagnosticToolTest {
 
     @Test
     void acceptsExactParityAndFreshTracePath() {
-        String result = tool((project, selector, environment) -> {
+        String result = tool((project, selector, environment, timeout) -> {
             assertEquals("CalculatorTest#adds", selector);
             report(project, "adds", "failure");
             if (!environment.isEmpty()) {
@@ -114,6 +114,7 @@ class TraceDiagnosticToolTest {
                 assertTrue(trace.startsWith(project.resolve("target")));
                 assertFalse(Files.exists(trace));
                 assertFalse(Files.exists(Path.of(trace + ".state")));
+                assertFalse(Files.exists(Path.of(trace + ".failed")));
                 assertTrue(Files.readString(project.resolve(SOURCE)).contains("final class JavafixTrace"));
                 trace(environment, 2, 0);
             } else {
@@ -128,7 +129,7 @@ class TraceDiagnosticToolTest {
     @ParameterizedTest
     @ValueSource(strings = {"passed", "identity"})
     void rejectsChangedOutcomeOrIdentity(String change) {
-        String result = tool((project, selector, environment) -> {
+        String result = tool((project, selector, environment, timeout) -> {
             boolean instrumented = !environment.isEmpty();
             report(project, instrumented && change.equals("identity") ? "different" : "adds",
                     instrumented && change.equals("passed") ? "" : "failure");
@@ -142,7 +143,7 @@ class TraceDiagnosticToolTest {
     @ParameterizedTest
     @ValueSource(strings = {"baseline", "instrumented"})
     void rejectsTimeoutEvenWhenReportsExist(String stage) {
-        String result = tool((project, selector, environment) -> {
+        String result = tool((project, selector, environment, timeout) -> {
             report(project, "adds", "failure");
             if (stage.equals(environment.isEmpty() ? "baseline" : "instrumented")) {
                 return new TestResult(TestResult.EXIT_TIMEOUT, "", "timeout");
@@ -156,7 +157,7 @@ class TraceDiagnosticToolTest {
     @ParameterizedTest
     @ValueSource(strings = {"baseline", "instrumented"})
     void rejectsMissingReports(String stage) {
-        String result = tool((project, selector, environment) -> {
+        String result = tool((project, selector, environment, timeout) -> {
             if (!stage.equals(environment.isEmpty() ? "baseline" : "instrumented")) report(project, "adds", "failure");
             return failed();
         }).execute(ARGUMENTS);
@@ -165,9 +166,9 @@ class TraceDiagnosticToolTest {
 
     @Test
     void rejectsPassingBaseline() {
-        String result = tool((project, selector, environment) -> {
+        String result = tool((project, selector, environment, timeout) -> {
             report(project, "adds", "");
-            return new TestResult(0, "BUILD SUCCESS", "");
+            return new TestResult(0, "Tests run: 1, Failures: 0, Errors: 0, Skipped: 0\nBUILD SUCCESS", "");
         }).execute(ARGUMENTS);
         noTrace(result, "baseline has no FAILED/ERROR tests");
         assertEquals(1, copies.size());
@@ -179,7 +180,7 @@ class TraceDiagnosticToolTest {
     void rejectsPartialReportsAfterForkFailure(String marker) {
         for (String stage : List.of("baseline", "instrumented")) {
             for (boolean stderr : List.of(false, true)) {
-                String result = tool((p, s, e) -> {
+                String result = tool((p, s, e, timeout) -> {
                     report(p, "completedA", "failure");
                     if (!e.isEmpty()) trace(e, 1, 0);
                     boolean crash = stage.equals(e.isEmpty() ? "baseline" : "instrumented");
@@ -195,7 +196,7 @@ class TraceDiagnosticToolTest {
     @ValueSource(strings = {"jvmRun1.dump", "jvmRun1.dumpstream"})
     void rejectsForkDumpArtifactsEvenWithMatchingXml(String dump) {
         for (String stage : List.of("baseline", "instrumented")) {
-            String result = tool((p, s, e) -> {
+            String result = tool((p, s, e, timeout) -> {
                 report(p, "completedA", "failure");
                 if (!e.isEmpty()) trace(e, 1, 0);
                 if (stage.equals(e.isEmpty() ? "baseline" : "instrumented")) {
@@ -210,7 +211,7 @@ class TraceDiagnosticToolTest {
     @ParameterizedTest
     @ValueSource(strings = {"baseline", "instrumented"})
     void rejectsCompletedTestTotalThatExceedsXmlCount(String stage) {
-        String result = tool((p, s, e) -> {
+        String result = tool((p, s, e, timeout) -> {
             report(p, "completedA", "failure");
             if (!e.isEmpty()) trace(e, 1, 0);
             int total = stage.equals(e.isEmpty() ? "baseline" : "instrumented") ? 2 : 1;
@@ -222,7 +223,7 @@ class TraceDiagnosticToolTest {
     @Test
     void comparesOnlyUnambiguousAggregateCounts() {
         String aggregate = "[ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0\n";
-        DiagnosticTestRunner completed = (p, s, e) -> {
+        DiagnosticTestRunner completed = (p, s, e, timeout) -> {
             report(p, "adds", "failure");
             if (!e.isEmpty()) trace(e, 1, 0);
             return new TestResult(1, aggregate.stripTrailing()
@@ -230,7 +231,7 @@ class TraceDiagnosticToolTest {
         };
         String result = tool(completed).execute(ARGUMENTS);
         assertTrue(result.contains("Trace:"), result);
-        noTrace(tool((p, s, e) -> {
+        noTrace(tool((p, s, e, timeout) -> {
             report(p, "adds", "failure");
             if (!e.isEmpty()) trace(e, 1, 0);
             return new TestResult(1, aggregate + aggregate, "");
@@ -250,7 +251,7 @@ class TraceDiagnosticToolTest {
         Path external = root.resolve("stale");
         report(external, "adds", "failure");
         for (String stage : List.of("baseline", "instrumented")) {
-            String result = tool((p, s, e) -> {
+            String result = tool((p, s, e, timeout) -> {
                 if (stage.equals(e.isEmpty() ? "baseline" : "instrumented")) {
                     Path reports = p.resolve("target/surefire-reports");
                     if (linkKind.equals("target-directory")) {
@@ -276,9 +277,9 @@ class TraceDiagnosticToolTest {
 
     @Test
     void distinguishesBuildFailureFromReportAmbiguity() {
-        noTrace(tool((p, s, e) -> new TestResult(1, "COMPILATION ERROR", "")).execute(ARGUMENTS),
+        noTrace(tool((p, s, e, timeout) -> new TestResult(1, "COMPILATION ERROR", "")).execute(ARGUMENTS),
                 "baseline build failure");
-        noTrace(tool((p, s, e) -> {
+        noTrace(tool((p, s, e, timeout) -> {
             report(p, "adds", "failure");
             Files.writeString(p.resolve("target/surefire-reports/TEST-fixture.xml"), "<broken");
             return failed();
@@ -287,15 +288,15 @@ class TraceDiagnosticToolTest {
 
     @Test
     void rejectsBaselineStartFailureAndRunnerExceptions() {
-        noTrace(tool((p, s, e) -> new TestResult(TestResult.EXIT_START_FAILURE, "", "")).execute(ARGUMENTS),
+        noTrace(tool((p, s, e, timeout) -> new TestResult(TestResult.EXIT_START_FAILURE, "", "")).execute(ARGUMENTS),
                 "baseline execution failure");
-        noTrace(tool((p, s, e) -> { throw new IOException("runner failed"); }).execute(ARGUMENTS),
+        noTrace(tool((p, s, e, timeout) -> { throw new IOException("runner failed"); }).execute(ARGUMENTS),
                 "diagnostic I/O failure");
     }
 
     @Test
     void checksOverallDeadlineBeforeSecondRun() {
-        TraceDiagnosticTool tool = new TraceDiagnosticTool(root, tracking((p, s, e) -> {
+        TraceDiagnosticTool tool = new TraceDiagnosticTool(root, tracking((p, s, e, timeout) -> {
             report(p, "adds", "failure");
             try { Thread.sleep(40); } catch (InterruptedException ex) { Thread.currentThread().interrupt(); }
             return failed();
@@ -309,7 +310,7 @@ class TraceDiagnosticToolTest {
     void rejectsUnsafeOrEmptySelector(String selector) {
         var arguments = new HashMap<>(ARGUMENTS);
         arguments.put("test", selector);
-        noTrace(tool((p, s, e) -> fail("must not launch Maven")).execute(arguments), "argument");
+        noTrace(tool((p, s, e, timeout) -> fail("must not launch Maven")).execute(arguments), "argument");
     }
 
     @ParameterizedTest
@@ -317,35 +318,35 @@ class TraceDiagnosticToolTest {
     void rejectsInvalidSourcePaths(String path) {
         var arguments = new HashMap<>(ARGUMENTS);
         arguments.put("path", path);
-        noTrace(tool((p, s, e) -> fail("must not launch Maven")).execute(arguments), "source path");
+        noTrace(tool((p, s, e, timeout) -> fail("must not launch Maven")).execute(arguments), "source path");
     }
 
     @Test
     void rejectsMissingAndUnknownArguments() {
         var arguments = new HashMap<>(ARGUMENTS);
         arguments.remove("method");
-        noTrace(tool((p, s, e) -> fail("must not launch Maven")).execute(arguments), "argument");
+        noTrace(tool((p, s, e, timeout) -> fail("must not launch Maven")).execute(arguments), "argument");
         arguments.put("unexpected", "value");
-        noTrace(tool((p, s, e) -> fail("must not launch Maven")).execute(arguments), "argument");
+        noTrace(tool((p, s, e, timeout) -> fail("must not launch Maven")).execute(arguments), "argument");
     }
 
     @Test
     void rejectsAmbiguousMethodBeforeRunningTests() throws Exception {
         Files.writeString(root.resolve(SOURCE), "package example; class Calculator { int add(int x){return x;} int add(){return 1;} }");
         originalHash = hash();
-        noTrace(tool((p, s, e) -> fail("must not launch Maven")).execute(ARGUMENTS), "Ambiguous method");
+        noTrace(tool((p, s, e, timeout) -> fail("must not launch Maven")).execute(ARGUMENTS), "Ambiguous method");
     }
 
     @Test
     void cleanupFailureOverridesOtherwiseSuccessfulTrace() {
         AtomicBoolean closed = new AtomicBoolean();
         int[] runs = {0};
-        TraceDiagnosticTool tool = new TraceDiagnosticTool(root, (p, s, e) -> {
+        TraceDiagnosticTool tool = new TraceDiagnosticTool(root, (p, s, e, timeout) -> {
             runs[0]++;
             report(p, "adds", "failure");
             if (!e.isEmpty()) trace(e, 1, 0);
             return failed();
-        }, Duration.ofMinutes(1), project -> {
+        }, Duration.ofMinutes(1), (project, checkpoint) -> {
             DiagnosticWorkspace workspace = DiagnosticWorkspace.create(project);
             copies.add(workspace.baselineRoot());
             copies.add(workspace.instrumentedRoot());
@@ -365,8 +366,8 @@ class TraceDiagnosticToolTest {
         Files.writeString(root.resolve(SOURCE), "package example; class Calculator { int add(int x){return x;} int add(){return 1;} }");
         originalHash = hash();
         AtomicBoolean closed = new AtomicBoolean();
-        TraceDiagnosticTool tool = new TraceDiagnosticTool(root, (p, s, e) -> fail("must not launch Maven"),
-                Duration.ofMinutes(1), project -> {
+        TraceDiagnosticTool tool = new TraceDiagnosticTool(root, (p, s, e, timeout) -> fail("must not launch Maven"),
+                Duration.ofMinutes(1), (project, checkpoint) -> {
             DiagnosticWorkspace workspace = DiagnosticWorkspace.create(project);
             copies.add(workspace.baselineRoot());
             copies.add(workspace.instrumentedRoot());
@@ -381,7 +382,7 @@ class TraceDiagnosticToolTest {
 
     @Test
     void reportsExactOverflowAndBoundsObservation() {
-        String result = tool((p, s, e) -> {
+        String result = tool((p, s, e, timeout) -> {
             report(p, "adds", "failure");
             if (!e.isEmpty()) trace(e, 500, 1234);
             return failed();
@@ -396,7 +397,7 @@ class TraceDiagnosticToolTest {
     @ValueSource(strings = {"missing", "malformed", "partial", "sequence", "wrong-source", "oversized-value", "state-mismatch",
             "blank-record", "overflowing-sequence", "duplicate-field", "trailing-json"})
     void rejectsUnavailableOrIncompleteTrace(String defect) {
-        String result = tool((p, s, e) -> {
+        String result = tool((p, s, e, timeout) -> {
             report(p, "adds", "failure");
             if (!e.isEmpty() && !defect.equals("missing")) {
                 trace(e, 1, 0);
@@ -422,24 +423,139 @@ class TraceDiagnosticToolTest {
         noTrace(result, "trace unavailable");
     }
 
+    @Test
+    void rejectsWriterFailureAfterAValidPrefix() {
+        String result = tool((p, s, e, timeout) -> {
+            report(p, "adds", "failure");
+            if (!e.isEmpty()) {
+                Path fixture = p.resolve("InterruptedProbe.java");
+                Files.writeString(fixture, """
+                        public class InterruptedProbe {
+                            public static void main(String[] args) {
+                                Probe.record("METHOD_ENTRY", 1, "", null);
+                                Thread.currentThread().interrupt();
+                                Probe.record("METHOD_ENTRY", 2, "", null);
+                                if (!Thread.currentThread().isInterrupted()) throw new AssertionError("interrupt lost");
+                            }
+                        }
+                        """ + TraceEventWriter.helperSource("Probe", SOURCE, "example.Calculator.add", 500, 160));
+                assertEquals(0, javax.tools.ToolProvider.getSystemJavaCompiler().run(null, null, null,
+                        "-encoding", "UTF-8", "-d", p.toString(), fixture.toString()));
+                try {
+                    var run = ProcessRunner.run(List.of(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                            "-cp", p.toString(), "InterruptedProbe"), p, p.resolve("probe.log"), Duration.ofSeconds(20), e);
+                    assertEquals(0, run.exitCode(), run.output());
+                } catch (InterruptedException ex) { throw new IOException(ex); }
+                assertEquals(1, Files.readAllLines(Path.of(e.get("JAVAFIX_TRACE_FILE"))).size());
+                assertEquals(24, Files.size(Path.of(e.get("JAVAFIX_TRACE_FILE") + ".state")));
+                assertTrue(Files.exists(Path.of(e.get("JAVAFIX_TRACE_FILE") + ".failed")));
+            }
+            return failed();
+        }).execute(ARGUMENTS);
+        noTrace(result, "capture failed");
+    }
+
+    @Test
+    void rejectsMissingCompletionAggregate() {
+        noTrace(tool((p, s, e, timeout) -> {
+            report(p, "adds", "failure");
+            if (!e.isEmpty()) trace(e, 1, 0);
+            return new TestResult(1, "BUILD FAILURE", "");
+        }).execute(ARGUMENTS), "incomplete reports");
+    }
+
+    @Test
+    void refusesSelectorThatReportsTwoTestcases() {
+        String result = tool((p, s, e, timeout) -> {
+            report(p, "adds", "failure");
+            Path report = p.resolve("target/surefire-reports/TEST-fixture.xml");
+            Files.writeString(report, Files.readString(report).replace("tests=\"1\"", "tests=\"2\"")
+                    .replace("</testsuite>", "<testcase classname=\"example.CalculatorTest\" name=\"other\"/></testsuite>"));
+            if (!e.isEmpty()) trace(e, 1, 0);
+            return new TestResult(1, "Tests run: 2, Failures: 1, Errors: 0, Skipped: 0", "");
+        }).execute(ARGUMENTS);
+        noTrace(result, "select exactly one failing test case");
+        assertEquals(1, copies.size());
+    }
+
+    @Test
+    void successfulTraceNamesItsSingleTestcase() {
+        String result = tool((p, s, e, timeout) -> {
+            report(p, "adds", "failure");
+            if (!e.isEmpty()) trace(e, 1, 0);
+            return failed();
+        }).execute(ARGUMENTS);
+        assertTrue(result.contains("example.CalculatorTest#adds"), result);
+    }
+
+    @Test
+    void propagatesRemainingBudgetToSecondRun() {
+        var clock = new java.util.concurrent.atomic.AtomicLong();
+        List<Duration> timeouts = new ArrayList<>();
+        TraceDiagnosticTool tool = new TraceDiagnosticTool(root, tracking((p, s, e, timeout) -> {
+            timeouts.add(timeout);
+            report(p, "adds", "failure");
+            if (e.isEmpty()) clock.addAndGet(Duration.ofSeconds(70).toNanos());
+            else trace(e, 1, 0);
+            return failed();
+        }), Duration.ofSeconds(90), clock::get);
+        assertTrue(tool.execute(ARGUMENTS).contains("Trace:"));
+        assertEquals(List.of(Duration.ofSeconds(90), Duration.ofSeconds(20)), timeouts);
+    }
+
+    @Test
+    void expirationAfterBaselinePreventsAnotherLaunch() {
+        var clock = new java.util.concurrent.atomic.AtomicLong();
+        TraceDiagnosticTool tool = new TraceDiagnosticTool(root, tracking((p, s, e, timeout) -> {
+            report(p, "adds", "failure");
+            clock.set(Duration.ofMinutes(1).toNanos());
+            return failed();
+        }), Duration.ofMinutes(1), clock::get);
+        noTrace(tool.execute(ARGUMENTS), "overall deadline");
+        assertEquals(1, copies.size());
+    }
+
+    @Test
+    void expirationAfterInstrumentedRunCannotReturnSuccess() {
+        var clock = new java.util.concurrent.atomic.AtomicLong();
+        TraceDiagnosticTool tool = new TraceDiagnosticTool(root, tracking((p, s, e, timeout) -> {
+            report(p, "adds", "failure");
+            if (!e.isEmpty()) {
+                trace(e, 1, 0);
+                clock.set(Duration.ofMinutes(1).toNanos());
+            }
+            return failed();
+        }), Duration.ofMinutes(1), clock::get);
+        noTrace(tool.execute(ARGUMENTS), "overall deadline");
+        assertEquals(2, copies.size());
+    }
+
+    @Test
+    void refusesOversizedSourceBeforeParsingOrLaunching() throws Exception {
+        Files.writeString(root.resolve(SOURCE), Files.readString(root.resolve(SOURCE)) + " ".repeat(1024 * 1024));
+        originalHash = hash();
+        noTrace(tool((p, s, e, timeout) -> fail("must not launch Maven")).execute(ARGUMENTS), "source size limit");
+    }
+
     private TraceDiagnosticTool tool(DiagnosticTestRunner runner) {
         return new TraceDiagnosticTool(root, tracking(runner), Duration.ofMinutes(3));
     }
 
     private DiagnosticTestRunner tracking(DiagnosticTestRunner runner) {
-        return (project, selector, environment) -> {
+        return (project, selector, environment, timeout) -> {
             copies.add(project);
             assertNotEquals(root, project);
-            return runner.run(project, selector, environment);
+            return runner.run(project, selector, environment, timeout);
         };
     }
 
-    private static TestResult failed() { return new TestResult(1, "Tests run: 1, Failures: 1\nBUILD FAILURE", ""); }
+    private static TestResult failed() { return new TestResult(1, "Tests run: 1, Failures: 1, Errors: 0, Skipped: 0\nBUILD FAILURE", ""); }
 
     private static void report(Path project, String identity, String outcome) throws IOException {
         Path directory = project.resolve("target/surefire-reports");
         Files.createDirectories(directory);
-        Files.writeString(directory.resolve("TEST-fixture.xml"), "<testsuite><testcase classname=\"example.CalculatorTest\" name=\""
+        Files.writeString(directory.resolve("TEST-fixture.xml"), "<testsuite tests=\"1\" failures=\"" + (outcome.equals("failure") ? 1 : 0)
+                + "\" errors=\"" + (outcome.equals("error") ? 1 : 0) + "\" skipped=\"0\"><testcase classname=\"example.CalculatorTest\" name=\""
                 + identity + "\">" + (outcome.isEmpty() ? "" : "<" + outcome + "/>") + "</testcase></testsuite>");
     }
 

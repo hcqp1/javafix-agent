@@ -13,6 +13,24 @@ import static org.junit.jupiter.api.Assertions.*;
 class TestOutcomeSignatureTest {
     @TempDir Path temp;
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"tests", "failures", "errors", "skipped"})
+    void rejectsSuiteCountersThatDisagreeWithDirectTestcases(String counter) throws IOException {
+        String xml = "<testsuite tests=\"1\" failures=\"0\" errors=\"0\" skipped=\"0\">"
+                + "<testcase classname=\"Example\" name=\"test\"/></testsuite>";
+        xml = xml.replace(counter + "=\"" + (counter.equals("tests") ? 1 : 0) + "\"", counter + "=\"2\"");
+        Files.writeString(temp.resolve("TEST-count.xml"), xml);
+        assertThrows(TestOutcomeSignature.ParseException.class, () -> TestOutcomeSignature.read(temp));
+    }
+
+    @Test
+    void refusesOversizedReportBeforeParsing() throws IOException {
+        Files.writeString(temp.resolve("TEST-large.xml"),
+                "<testsuite tests=\"1\" failures=\"0\" errors=\"0\" skipped=\"0\">"
+                        + "<testcase classname=\"Example\" name=\"test\"/>" + " ".repeat(1024 * 1024) + "</testsuite>");
+        assertThrows(TestOutcomeSignature.ParseException.class, () -> TestOutcomeSignature.read(temp));
+    }
+
     @Test
     void readsFailureIdentityAndOutcome() throws IOException {
         TestOutcomeSignature signature = TestOutcomeSignature.read(Path.of("src/test/resources/surefire/one-failure"));
@@ -46,7 +64,7 @@ class TestOutcomeSignatureTest {
     void rejectsAnEmptyReportEvenWhenAnotherReportHasTests() throws IOException {
         Path reports = temp.resolve("mixed-empty");
         Files.createDirectories(reports);
-        Files.writeString(reports.resolve("TEST-valid.xml"), "<testsuite><testcase classname=\"example.Test\" name=\"works\"/></testsuite>");
+        Files.writeString(reports.resolve("TEST-valid.xml"), "<testsuite tests=\"1\" failures=\"0\" errors=\"0\" skipped=\"0\"><testcase classname=\"example.Test\" name=\"works\"/></testsuite>");
         Files.writeString(reports.resolve("TEST-empty.xml"), "<testsuite tests=\"0\"/>");
         assertThrows(TestOutcomeSignature.ParseException.class, () -> TestOutcomeSignature.read(reports));
     }
@@ -69,7 +87,7 @@ class TestOutcomeSignatureTest {
         Path reports = temp.resolve("priority");
         java.nio.file.Files.createDirectories(reports);
         java.nio.file.Files.writeString(reports.resolve("TEST-priority.xml"), """
-                <testsuite>
+                <testsuite tests="4" failures="1" errors="1" skipped="1">
                   <testcase classname="example.Priority" name="error"><failure/><skipped/><error/></testcase>
                   <testcase classname="example.Priority" name="failure"><skipped/><failure/></testcase>
                   <testcase classname="example.Priority" name="skipped"><skipped/></testcase>

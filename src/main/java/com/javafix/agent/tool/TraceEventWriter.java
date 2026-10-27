@@ -30,7 +30,7 @@ public final class TraceEventWriter {
                                 path = java.nio.file.Paths.get(configured);
                                 monitor = ("javafix.trace:" + path.toFile().getCanonicalPath()).intern();
                             }
-                        } catch (java.lang.Throwable ignored) { path = null; }
+                        } catch (java.lang.Throwable ignored) { failCapture(); }
                     }
                     static synchronized void record(java.lang.String kind, int line,
                             java.lang.String variableName, java.lang.Object value) {
@@ -71,11 +71,22 @@ public final class TraceEventWriter {
                                     state.writeLong(sequence); state.writeLong(omitted); state.writeLong(end);
                                 }
                             } catch (java.lang.Throwable ignored) {
-                                path = null;
+                                failCapture();
                                 try { if (trace != null) trace.close(); } catch (java.lang.Throwable closeFailure) { }
                                 try { if (state != null) state.close(); } catch (java.lang.Throwable closeFailure) { }
                             }
                         }
+                    }
+                    private static void failCapture() {
+                        // This separate synchronous file does not depend on the interrupted channel or its lock.
+                        try {
+                            if (path != null) {
+                                try (java.io.RandomAccessFile failed = new java.io.RandomAccessFile(path.toString() + ".failed", "rws")) {
+                                    failed.write(1);
+                                }
+                            }
+                        } catch (java.lang.Throwable markerFailure) { }
+                        path = null;
                     }
                     private static java.lang.String scalar(java.lang.Object value) {
                         if (value == null) return null;

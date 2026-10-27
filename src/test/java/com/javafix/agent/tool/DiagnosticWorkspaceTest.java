@@ -16,6 +16,20 @@ class DiagnosticWorkspaceTest {
     Path project;
 
     @Test
+    void checksDeadlineDuringCopyAndCleansPartialWorkspace() throws Exception {
+        Files.writeString(project.resolve("first.txt"), "first");
+        Files.writeString(project.resolve("second.txt"), "second");
+        Path temporaryBase = Files.createDirectory(project.resolve("scratch"));
+        var checks = new java.util.concurrent.atomic.AtomicInteger();
+        assertThrows(IllegalStateException.class, () -> DiagnosticWorkspace.create(project, 1000, temporaryBase, () -> {
+            if (checks.incrementAndGet() == 3) throw new IllegalStateException("deadline expired during copy");
+        }));
+        assertEquals(3, checks.get());
+        try (var files = Files.list(temporaryBase)) { assertEquals(0, files.count()); }
+        assertEquals("first", Files.readString(project.resolve("first.txt")));
+    }
+
+    @Test
     void copiesProjectFilesToBothRootsAndRemovesTemporaryRootOnClose() throws Exception {
         Files.createDirectories(project.resolve("src/main/java"));
         Files.writeString(project.resolve("pom.xml"), "<project/>\n");

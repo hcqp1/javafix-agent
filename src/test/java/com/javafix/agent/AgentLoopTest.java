@@ -44,9 +44,10 @@ class AgentLoopTest {
 
         String localizationPrompt = llm.prompts().get(1);
         assertTrue(localizationPrompt.contains("diagnose_trace"), localizationPrompt);
-        assertTrue(localizationPrompt.contains("when all per-test identities and outcomes match"), localizationPrompt);
+        assertTrue(localizationPrompt.contains("when exactly one failing test case has the same identity and outcome in both runs"), localizationPrompt);
         assertTrue(localizationPrompt.contains("有界运行时证据"), localizationPrompt);
         assertTrue(localizationPrompt.contains("聚焦"), localizationPrompt);
+        assertTrue(localizationPrompt.contains("第一版仅支持一个失败测试用例"), localizationPrompt);
         assertTrue(localizationPrompt.contains("可疑方法"), localizationPrompt);
         assertTrue(localizationPrompt.contains("未经信任"), localizationPrompt);
         assertTrue(localizationPrompt.contains("逐测试身份和结果类别匹配"), localizationPrompt);

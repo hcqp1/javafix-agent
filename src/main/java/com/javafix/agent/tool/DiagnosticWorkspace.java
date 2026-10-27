@@ -37,10 +37,19 @@ public final class DiagnosticWorkspace implements AutoCloseable {
         return create(source, maxBytes, Path.of(System.getProperty("java.io.tmpdir")));
     }
 
+    static DiagnosticWorkspace create(Path projectRoot, Runnable checkpoint) throws IOException {
+        return create(projectRoot, DEFAULT_MAX_BYTES, Path.of(System.getProperty("java.io.tmpdir")), checkpoint);
+    }
+
     static DiagnosticWorkspace create(Path projectRoot, long maxBytes, Path temporaryBase) throws IOException {
+        return create(projectRoot, maxBytes, temporaryBase, () -> {});
+    }
+
+    static DiagnosticWorkspace create(Path projectRoot, long maxBytes, Path temporaryBase, Runnable checkpoint) throws IOException {
         if (maxBytes < 0) {
             throw new IllegalArgumentException("maxBytes must not be negative");
         }
+        checkpoint.run();
         Path source = projectRoot.toAbsolutePath().normalize();
         if (Files.isSymbolicLink(source) || !Files.isDirectory(source)) {
             throw new IOException("Project root is not a directory: " + source);
@@ -57,8 +66,8 @@ public final class DiagnosticWorkspace implements AutoCloseable {
             Files.createDirectory(workspace.baselineRoot);
             Files.createDirectory(workspace.instrumentedRoot);
             long[] copiedBytes = {0};
-            copyProject(source, workspace.baselineRoot, temp, maxBytes, copiedBytes);
-            copyProject(source, workspace.instrumentedRoot, temp, maxBytes, copiedBytes);
+            copyProject(source, workspace.baselineRoot, temp, maxBytes, copiedBytes, checkpoint);
+            copyProject(source, workspace.instrumentedRoot, temp, maxBytes, copiedBytes, checkpoint);
             return workspace;
         } catch (IOException | RuntimeException failure) {
             try {
@@ -84,11 +93,12 @@ public final class DiagnosticWorkspace implements AutoCloseable {
     }
 
     private static void copyProject(Path source, Path destination, Path excludedRoot,
-                                    long maxBytes, long[] copiedBytes)
+                                    long maxBytes, long[] copiedBytes, Runnable checkpoint)
             throws IOException {
         Files.walkFileTree(source, new SimpleFileVisitor<>() {
             @Override
             public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
+                checkpoint.run();
                 if (dir.startsWith(excludedRoot)) {
                     return FileVisitResult.SKIP_SUBTREE;
                 }
@@ -103,6 +113,7 @@ public final class DiagnosticWorkspace implements AutoCloseable {
 
             @Override
             public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                checkpoint.run();
                 if (!attrs.isRegularFile()) {
                     return FileVisitResult.CONTINUE;
                 }
@@ -113,6 +124,7 @@ public final class DiagnosticWorkspace implements AutoCloseable {
                 Path target = destination.resolve(source.relativize(file));
                 Files.createDirectories(target.getParent());
                 Files.copy(file, target);
+                checkpoint.run();
                 return FileVisitResult.CONTINUE;
             }
         });

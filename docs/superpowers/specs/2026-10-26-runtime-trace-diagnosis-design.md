@@ -4,25 +4,25 @@
 
 JavaFixAgent currently gives the model a bounded summary of Maven failures and records the agent's own actions. It does not collect runtime values or branch execution from the program under repair. This design adds an opt-in, controlled diagnostic pass inspired by TraceCoder: collect bounded execution evidence from one suspected Java method, then provide that evidence to the existing repair loop.
 
-The first version must keep instrumentation out of the target working tree, avoid changing application expression semantics, and discard trace output when instrumentation changes the selected tests' outcomes.
+The first version must keep instrumentation out of the target working tree, avoid changing application expression semantics, and discard trace output when instrumentation changes the single selected failing testcase's outcome.
 
 ## 2. Scope
 
 ### Included
 
-- A new `diagnose_trace` tool for a caller-specified Java source file, method, and Maven test selector.
+- A new `diagnose_trace` tool for a caller-specified Java source file, method, and Maven test selector that reports exactly one FAILED/ERROR testcase. Multi-case selectors, including parameterized invocations with multiple reported cases, are refused in V1.
 - Parse the selected Java source using a Java AST library compatible with Java 17 syntax.
 - Instrument only the selected method in a disposable copy of the target Maven project.
 - Emit bounded events for method entry, standalone local-variable declarations or assignment statements, and branch entry. Events include source location and sequence number; embedded assignments and return values are not rewritten or logged.
 - Record only safe scalar values (primitive values, boxed primitives, characters, strings, and null); do not call arbitrary object `toString()`, getters, or user code to format values.
-- Run the selected tests against an uninstrumented baseline copy and an instrumented copy, then compare per-test outcome signatures. Return a trace only if the signatures match.
+- Run the single selected failing testcase against an uninstrumented baseline copy and an instrumented copy. Require complete Surefire signatures with the same single identity and result category. Label returned evidence with `className#testName`; V1 does not support attribution across multiple testcases.
 - Bound copy scope, test duration, trace event count, per-value length, and total feedback size; delete temporary project copies after the run, including error paths.
 - Explain unsupported source, invalid method selection, baseline failure, timeout, build failure, trace overflow, and outcome mismatch distinctly to the agent.
 - Integrate the tool with the current action protocol and describe when to use it in the localization phase.
 
 ### Excluded from this version
 
-- Automatic suspicious-method selection or repository-wide instrumentation.
+- Automatic suspicious-method selection, repository-wide instrumentation, or multi-testcase trace attribution.
 - Bytecode/JVM debugger instrumentation, heap snapshots, object graph traversal, or asynchronous/thread causal tracing.
 - Gradle support.
 - Persistent cross-task memory, candidate patch ranking, or rollback of repair candidates.
@@ -33,10 +33,10 @@ The first version must keep instrumentation out of the target working tree, avoi
 1. The agent reads the failing test summary and source, then calls `diagnose_trace` with a repository-relative source path, exact class/method selector, and a focused Maven test selector.
 2. The tool validates arguments and confirms all paths remain under the repository root.
 3. It creates two temporary project copies, excluding generated output and VCS metadata. The original repository is read-only for this operation.
-4. It runs the selected tests in the baseline copy and records a stable signature by test identity and outcome from Surefire reports.
+4. It runs the selected tests in the baseline copy and records a complete signature from Surefire reports. If it contains anything other than exactly one FAILED/ERROR testcase, return `select exactly one failing test case` without launching the instrumented run.
 5. It parses the selected source file, locates exactly one requested method, and inserts probes without rewriting expressions. Unsupported or ambiguous methods fail closed.
 6. It runs the same selected tests in the instrumented copy, collects trace events through a generated helper, and reads per-test outcomes.
-7. If baseline and instrumented outcome signatures differ, the tool returns no trace and reports the mismatch. Otherwise it returns a bounded trace grouped by test and method, plus the signature comparison summary.
+7. If baseline and instrumented outcome signatures differ, the tool returns no trace and reports the mismatch. Otherwise it returns a bounded trace labeled with the single `className#testName` and method, plus the signature comparison summary. JSONL events do not independently identify testcases, so multi-case attribution is outside V1.
 8. The agent uses the evidence in its existing localization/fix phases. The trace remains part of the current run transcript and is not saved as cross-task memory.
 9. Temporary copies are removed in a `finally` path. Maven logs needed for diagnosis are bounded in the tool response; this first version does not preserve potentially sensitive full trace files in the user's repository.
 
@@ -64,9 +64,11 @@ The first version must keep instrumentation out of the target working tree, avoi
 
 - Baseline tests must produce readable Surefire outcome signatures. If the baseline cannot start, times out, has no reports, or cannot be parsed, do not instrument or return a trace.
 - If instrumented tests fail to build, time out, or produce no comparable report, return the reason and no trace.
-- Compare per-test identity and result category rather than aggregate counts alone.
+- Validate every suite’s declared tests/failures/errors/skipped counts against direct testcase children. Require exactly one recognized Maven aggregate matching the XML testcase count; missing, mismatching or ambiguous totals fail closed. Continue rejecting fork-crash markers and Surefire dump artifacts.
+- Compare the single testcase identity and result category in addition to complete aggregate counts.
+- On any writer error, persist a separate per-run `.failed` marker independently of state counters and channel locking. Clear it before launch and reject its presence after Maven, even if the JSONL prefix and 24-byte state remain consistent.
 - Cap project-copy size and skip generated/build/VCS directories. If a project exceeds the configured copy limit, stop with an explicit unsupported-size result.
-- Apply existing Maven timeout behavior independently to each run, with an overall diagnostic budget so baseline plus instrumented execution cannot run indefinitely.
+- Enforce a 10-minute overall budget. Pass the smaller of the configured Maven timeout, five minutes, and remaining budget to each launch. Check deadlines before/after copying and parsing/report/trace processing, and during the copy walk. Limit selected source and each XML report to 1 MiB before parsing. Cleanup still runs after budget exhaustion.
 - Cap trace output and event count. On overflow, report truncation and retain the earliest bounded events with omitted-event count.
 - Clean temporary directories even when Maven or parsing fails. Cleanup failures are reported without hiding the primary diagnostic error.
 

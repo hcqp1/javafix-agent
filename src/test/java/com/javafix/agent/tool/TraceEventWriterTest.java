@@ -64,7 +64,9 @@ class TraceEventWriterTest {
     @Test
     void writerFailuresDoNotChangeApplicationExecution() throws Exception {
         compile(2, 8, "Probe.record(\"entry\", 1, \"x\", new Dangerous()); System.out.print(\"survived\");");
-        ProcessRunner.Result result = run(Map.of("JAVAFIX_TRACE_FILE", directory.toString()));
+        Path invalidTrace = Files.createDirectory(directory.resolve("invalid-trace"));
+        ProcessRunner.Result result = run(Map.of("JAVAFIX_TRACE_FILE", invalidTrace.toString()));
+        assertTrue(Files.exists(Path.of(invalidTrace + ".failed")));
         assertEquals(0, result.exitCode(), result.output());
         assertEquals("survived", result.output());
     }

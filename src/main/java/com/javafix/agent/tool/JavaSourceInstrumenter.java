@@ -56,7 +56,10 @@ public final class JavaSourceInstrumenter {
         if (helperClassName == null || !SourceVersion.isName(helperClassName, SourceVersion.RELEASE_17)) {
             throw new InstrumentationException("Invalid helper class name: " + helperClassName);
         }
-        String source = Files.readString(sourceFile);
+        byte[] sourceBytes;
+        try (var input = Files.newInputStream(sourceFile)) { sourceBytes = input.readNBytes(1024 * 1024 + 1); }
+        if (sourceBytes.length > 1024 * 1024) throw new InstrumentationException("Java source size limit exceeded (1 MiB)");
+        String source = java.nio.charset.StandardCharsets.UTF_8.newDecoder().decode(java.nio.ByteBuffer.wrap(sourceBytes)).toString();
         var parser = new JavaParser(new ParserConfiguration()
                 .setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_17).setTabSize(1));
         var parsed = parser.parse(source);

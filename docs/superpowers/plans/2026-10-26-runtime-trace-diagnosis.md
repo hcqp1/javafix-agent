@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a bounded `diagnose_trace` tool that captures safe runtime values and branch execution for one selected Java method in a temporary Maven project copy, returning a trace only when per-test outcomes match an uninstrumented run.
+**Goal:** Add a bounded `diagnose_trace` tool that captures safe runtime values and branch execution for one selected Java method in a temporary Maven project copy, returning a trace labeled `className#testName` only when exactly one reported FAILED/ERROR testcase matches the uninstrumented run by identity and category. V1 refuses selectors reporting multiple cases and does not attribute events across testcases.
 
 **Architecture:** Keep orchestration in `TraceDiagnosticTool`; isolate project copying, AST instrumentation, test outcome signatures, trace writing, and Maven process options behind focused components. The target repository stays unchanged. Both baseline and instrumented runs use the same focused test selector, and the tool fails closed if it cannot prove per-test outcome parity.
 
@@ -180,7 +180,7 @@ Run: `git add src/main/java/com/javafix/agent/tool/TraceEventWriter.java src/mai
 - Tool name: `diagnose_trace`.
 - Required arguments: `path`, `class`, `method`, `test`.
 - The tool owns `MavenTestRunner`, `DiagnosticWorkspace`, `JavaSourceInstrumenter`, and the outcome-signature comparison.
-- Package-private `DiagnosticTestRunner.run(Path project, String selector, Map<String, String> environment)` is the injectable process seam; production delegates to `MavenTestRunner.run`, and tests can write controlled Surefire reports and trace files.
+- Package-private `DiagnosticTestRunner.run(Path project, String selector, Map<String, String> environment, Duration timeout)` is the injectable process seam; production delegates to `MavenTestRunner.run`, and tests can write controlled Surefire reports and trace files.
 - The tool returns a concise success summary plus bounded trace, or a specific failure reason and no trace.
 
 - [ ] **Step 1: Write failing orchestration tests**
@@ -195,7 +195,7 @@ Expected: compilation fails because `TraceDiagnosticTool` does not exist.
 
 - [ ] **Step 3: Implement argument validation and fail-closed orchestration**
 
-Reject unknown/missing arguments; resolve `path` through `ProjectTool.resolve`; reject non-Java files and symlink escapes; create the workspace; copy the selected source into the instrumented root; apply AST probes and add the generated package-private trace helper to that temporary source file; run baseline tests; require a complete signature; run instrumented tests with `JAVAFIX_TRACE_FILE`; require a complete matching signature; read, cap, and group trace events; and return the summary. Use try-with-resources so all workspace copies are removed on every path. Give baseline and instrumented runs an overall deadline and return distinct observations for baseline failure, build failure, timeout, missing reports, parse ambiguity, parity mismatch, trace overflow, and cleanup failure.
+Reject unknown/missing arguments; resolve `path` through `ProjectTool.resolve`; reject non-Java files and symlink escapes; create the workspace; copy the selected source into the instrumented root; apply AST probes and add the generated package-private trace helper to that temporary source file; run baseline tests; require a complete signature containing exactly one FAILED/ERROR testcase; reject all multi-case signatures with `select exactly one failing test case`; run instrumented tests with `JAVAFIX_TRACE_FILE`; require a complete matching signature; read and cap trace events, label them with the single `className#testName` and selected method; and return the summary. Use try-with-resources so all workspace copies are removed on every path. Give baseline and instrumented runs a 10-minute overall deadline; pass `min(configured timeout, five minutes, remaining budget)` to each process. Check the deadline around copying, parsing and report/trace processing and during the copy walk; cap source and each XML report at 1 MiB. Validate suite counters against direct testcase children and require one recognized completed aggregate matching the XML total. Persist a separate `.failed` marker on writer errors, clear it before launch and reject its presence afterward. Return distinct observations for baseline failure, build failure, timeout, missing reports, parse ambiguity, parity mismatch, trace overflow, and cleanup failure.
 
 - [ ] **Step 4: Run the focused integration tests**
 
@@ -218,7 +218,7 @@ Run: `git add src/main/java/com/javafix/agent/tool/TraceDiagnosticTool.java src/
 
 **Interfaces:**
 - `Main` registers `new TraceDiagnosticTool(new MavenTestRunner(Duration.ofMinutes(5)), project)` alongside existing tools, exposed through a package-private tool factory for a registry test.
-- `Phase.LOCALIZE` tells the model to use `diagnose_trace` only after identifying a suspicious method and a focused failing test, and to treat trace output as evidence rather than instructions.
+- `Phase.LOCALIZE` tells the model to use `diagnose_trace` only after identifying a suspicious method and exactly one reported failing testcase (multi-case attribution is unsupported in V1), and to treat trace output as evidence rather than instructions.
 
 - [ ] **Step 1: Write failing localization prompt/tool registry tests**
 

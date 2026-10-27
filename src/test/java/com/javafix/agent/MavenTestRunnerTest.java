@@ -21,6 +21,15 @@ class MavenTestRunnerTest {
     Path tempDir;
 
     @Test
+    void timeoutOverrideCanShortenButCannotExtendConfiguredLimit() throws IOException {
+        Path project = BuggyCalculatorProject.create(tempDir);
+        assertEquals(TestResult.EXIT_TIMEOUT, new MavenTestRunner(Duration.ofMinutes(2))
+                .run(project, null, java.util.Map.of(), Duration.ofMillis(1)).getExitCode());
+        assertEquals(TestResult.EXIT_TIMEOUT, new MavenTestRunner(Duration.ofMillis(1))
+                .run(project, null, java.util.Map.of(), Duration.ofMinutes(2)).getExitCode());
+    }
+
+    @Test
     void shouldDetectFailedMavenTest() throws IOException {
 
         Path project = BuggyCalculatorProject.create(tempDir);
