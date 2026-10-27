@@ -38,3 +38,40 @@ The omitted-count summary is emitted at normal JVM shutdown. A forcibly terminat
 - `git diff --check`: passed before staging.
 
 No outstanding implementation issue was found in the requested scope. No additional dependencies or changes to unrelated production paths were introduced.
+
+## Review follow-up: JDK shadowing and aggregate fork-safe bounds
+
+The review identified two correctness gaps in the initial implementation: unqualified JDK names could resolve to application classes, and per-helper counters plus a shutdown hook could neither enforce aggregate fork bounds nor count calls from later application shutdown hooks. The earlier self-review conclusion and cross-JVM/shutdown-summary limitations above are superseded by this section.
+
+### Reproduction before fixes
+
+Added compiled-fixture regressions before changing production code. `mvn -Dtest=TraceEventWriterTest,MavenCommandTest test` reproduced all four cases:
+
+- Three concurrent JVMs each writing through four threads produced **24 records instead of the aggregate limit of 8**.
+- A delayed application shutdown hook produced a reported omitted count of **1 instead of 4**.
+- Reading the trace before JVM shutdown found no omission summary (12 calls, limit 1, expected 11 omitted).
+- Same-package application classes named `Boolean` and `System` were used by the old helper: application `System.getenv` executed, and the throwing application `Boolean.toString()` disabled capture. The initial assertion was a missing-file read; after making the test assert file existence explicitly, the targeted RED run failed with **1 assertion failure, 0 errors**, showing `application System invoked` in child output.
+
+RED logs: `.superpowers/sdd/task-4-review-red.log` and `.superpowers/sdd/task-4-shadow-red.log`.
+
+### Fix and shared-file protocol
+
+Every JDK type in generated source is fully qualified, including `java.lang.Object`, `String`, all wrapper classes, `Class`, `StringBuilder`, `Throwable`, and `System`, plus all I/O, path, locking, and charset APIs. There is no shutdown hook or runtime thread creation left in the helper. The compiled shadow fixture now also defines same-package `Object`, `String`, all remaining wrapper names, `Class`, `StringBuilder`, `Throwable`, `Runtime`, `Thread`, and `Runnable`; the helper compiles and captures the application Boolean as `<type:Boolean>` without invoking either application override.
+
+A sibling **`<JAVAFIX_TRACE_FILE>.state`** stores exactly three big-endian longs: retained-event count, omitted-call count, and the byte offset immediately after retained events (24 bytes total). Every call acquires a JVM-wide canonical-path interned monitor and then an OS exclusive file lock on the state file. The monitor coordinates helpers/classloaders in one JVM; the file lock coordinates Maven fork JVMs. Counters, trace writes, and state writes all occur inside that lock.
+
+Until the global event cap is reached, the writer appends regular events with globally increasing sequence numbers and updates the end offset. Later calls update the shared omitted counter and overwrite the **single terminal overflow JSONL record** at that offset. The count is immediately visible after each completed record call, including calls made by application shutdown hooks. The number of trace records stays at most `eventLimit + 1` across all helpers and forks. Overflow records grow monotonically with the decimal counter, so rewriting requires no truncation. Dropped values are never formatted. Long omission counts saturate at `Long.MAX_VALUE`.
+
+Unbuffered file handles remain open for the helper JVM's lifetime to avoid reopening files on every hot probe; the OS closes them at process exit. Writer failure disables capture and closes that helper's handles. No trace hook or final flush is required. An unmatched pre-existing nonempty trace/state pair fails open instead of appending to an untracked trace. The diagnostic run must use a fresh trace path and keep the sibling state file until all Maven forks have finished; normal scratch-directory cleanup removes both together. Task 5 can continue consuming the same JSONL overflow event without reading the sidecar.
+
+### Regression coverage and self-review
+
+The fork test now exercises **three concurrent JVMs, four threads per JVM, and two generated helper classes per JVM**. Across 1,200 calls with cap 7 it asserts exactly **8 parseable records**, sequences 1 through 8, and **1,193 omitted calls**, plus a bounded trace file size. Additional regressions prove delayed shutdown-hook calls and live omission reporting. Reviewed all generated JDK references, lock acquisition order, shared state positioning, UTF-8 byte offsets, terminal-record replacement, normal/failing file-handle behavior, and compatibility with the existing scalar-safe tests.
+
+The first lock-protected implementation reopened handles and truncated the trace on every call, making the 1,000-call stress fixture hit its 20-second timeout. Reusing unbuffered handles and eliminating unnecessary truncation reduced the complete writer-test class to about **4.5 seconds**; the unchanged timeout now passes. This was a performance issue in the intermediate fix, not a weakened test bound.
+
+Final expanded focused command: `mvn -Dtest=TraceEventWriterTest,MavenCommandTest test` passed **12 tests, 0 failures, 0 errors, 0 skips**, BUILD SUCCESS. Log: `.superpowers/sdd/task-4-review-focused.log`.
+
+Abrupt process death during an in-progress file operation or a filesystem failure can still leave an incomplete trace; later orchestration must reject malformed/incomplete diagnostic data as unavailable. Completed normal calls, concurrent fork calls, and normal shutdown-hook calls no longer depend on a best-effort shutdown summary or separate per-JVM caps.
+
+Review-fix final full verification: `mvn test` completed with **116 tests, 0 failures, 0 errors, 5 existing environment skips**, BUILD SUCCESS, **2:37** elapsed. The expanded writer class passed all 8 tests in 3.647 seconds. Log: `.superpowers/sdd/task-4-review-full.log`. `git diff --check` passed after the final source formatting change. Changes remain limited to the writer, its focused tests, and this report; no outstanding review finding remains in the requested normal/concurrent/shutdown behavior.

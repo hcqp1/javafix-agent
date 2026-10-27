@@ -19,63 +19,85 @@ public final class TraceEventWriter {
         }
         return """
                 final class %s {
-                    private static long sequence;
-                    private static long omitted;
                     private static java.nio.file.Path path;
+                    private static java.lang.String monitor;
+                    private static java.io.RandomAccessFile state;
+                    private static java.io.RandomAccessFile trace;
                     static {
                         try {
-                            String configured = System.getenv("JAVAFIX_TRACE_FILE");
+                            java.lang.String configured = java.lang.System.getenv("JAVAFIX_TRACE_FILE");
                             if (configured != null && !configured.isEmpty()) {
                                 path = java.nio.file.Paths.get(configured);
-                                Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
-                                    public void run() { flushOmitted(); }
-                                }));
+                                monitor = ("javafix.trace:" + path.toFile().getCanonicalPath()).intern();
                             }
-                        } catch (Throwable ignored) { path = null; }
+                        } catch (java.lang.Throwable ignored) { path = null; }
                     }
-                    static synchronized void record(String kind, int line, String variableName, Object value) {
+                    static synchronized void record(java.lang.String kind, int line,
+                            java.lang.String variableName, java.lang.Object value) {
                         if (path == null) return;
-                        if (sequence >= %d) { if (omitted < Long.MAX_VALUE) omitted++; return; }
-                        try {
-                            String text = scalar(value);
-                            boolean truncated = text != null && text.length() > %d;
-                            if (truncated) text = text.substring(0, %d);
-                            append("{\\"sequence\\":" + (++sequence)
-                                + ",\\"source\\":" + quote(%s) + ",\\"method\\":" + quote(%s)
-                                + ",\\"kind\\":" + quote(kind) + ",\\"line\\":" + line
-                                + ",\\"variable\\":" + quote(variableName) + ",\\"value\\":" + quote(text)
-                                + ",\\"truncated\\":" + truncated + "}");
-                        } catch (Throwable ignored) { path = null; }
+                        // Interning shares the JVM monitor across generated helpers and classloaders.
+                        synchronized (monitor) {
+                            try {
+                                // Keep unbuffered handles for this JVM's lifetime; avoid reopening on hot probes.
+                                if (state == null) state = new java.io.RandomAccessFile(path.toString() + ".state", "rw");
+                                try (java.nio.channels.FileLock lock = state.getChannel().lock()) {
+                                    if (trace == null) trace = new java.io.RandomAccessFile(path.toFile(), "rw");
+                                    long sequence = 0;
+                                    long omitted = 0;
+                                    long end = 0;
+                                    state.seek(0);
+                                    if (state.length() == 24) {
+                                        sequence = state.readLong(); omitted = state.readLong(); end = state.readLong();
+                                    } else if (state.length() != 0 || trace.length() != 0) {
+                                        throw new java.io.IOException("Trace requires matching state");
+                                    }
+                                    trace.seek(end);
+                                    if (sequence >= %d) {
+                                        if (omitted < java.lang.Long.MAX_VALUE) omitted++;
+                                        write(trace, "{\\"sequence\\":" + (sequence + 1)
+                                            + ",\\"kind\\":\\"overflow\\",\\"omitted\\":" + omitted + "}");
+                                    } else {
+                                        java.lang.String text = scalar(value);
+                                        boolean truncated = text != null && text.length() > %d;
+                                        if (truncated) text = text.substring(0, %d);
+                                        write(trace, "{\\"sequence\\":" + (++sequence)
+                                            + ",\\"source\\":" + quote(%s) + ",\\"method\\":" + quote(%s)
+                                            + ",\\"kind\\":" + quote(kind) + ",\\"line\\":" + line
+                                            + ",\\"variable\\":" + quote(variableName) + ",\\"value\\":" + quote(text)
+                                            + ",\\"truncated\\":" + truncated + "}");
+                                        end = trace.getFilePointer();
+                                    }
+                                    state.seek(0);
+                                    state.writeLong(sequence); state.writeLong(omitted); state.writeLong(end);
+                                }
+                            } catch (java.lang.Throwable ignored) {
+                                path = null;
+                                try { if (trace != null) trace.close(); } catch (java.lang.Throwable closeFailure) { }
+                                try { if (state != null) state.close(); } catch (java.lang.Throwable closeFailure) { }
+                            }
+                        }
                     }
-                    private static String scalar(Object value) {
+                    private static java.lang.String scalar(java.lang.Object value) {
                         if (value == null) return null;
-                        Class<?> type = value.getClass();
-                        if (type == String.class) return (String) value;
-                        if (type == Character.class || type == Boolean.class || type == Byte.class
-                                || type == Short.class || type == Integer.class || type == Long.class
-                                || type == Float.class || type == Double.class) return value.toString();
+                        java.lang.Class<?> type = value.getClass();
+                        if (type == java.lang.String.class) return (java.lang.String) value;
+                        if (type == java.lang.Character.class || type == java.lang.Boolean.class || type == java.lang.Byte.class
+                                || type == java.lang.Short.class || type == java.lang.Integer.class || type == java.lang.Long.class
+                                || type == java.lang.Float.class || type == java.lang.Double.class) return value.toString();
                         return "<type:" + type.getName() + ">";
                     }
-                    private static synchronized void flushOmitted() {
-                        if (path == null || omitted == 0) return;
-                        try {
-                            append("{\\"sequence\\":" + (sequence + 1)
-                                + ",\\"kind\\":\\"overflow\\",\\"omitted\\":" + omitted + "}");
-                        } catch (Throwable ignored) { path = null; }
+                    private static void write(java.io.RandomAccessFile trace, java.lang.String event) throws java.io.IOException {
+                        trace.write((event + "\\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
                     }
-                    private static void append(String event) throws java.io.IOException {
-                        java.nio.file.Files.write(path, (event + "\\n").getBytes(java.nio.charset.StandardCharsets.UTF_8),
-                            java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
-                    }
-                    private static String quote(String text) {
+                    private static java.lang.String quote(java.lang.String text) {
                         if (text == null) return "null";
-                        StringBuilder result = new StringBuilder("\\\"");
+                        java.lang.StringBuilder result = new java.lang.StringBuilder("\\\"");
                         for (int i = 0; i < text.length(); i++) {
                             char c = text.charAt(i);
                             if (c == 34 || c == 92) { result.append((char) 92).append(c); }
-                            else if (c < 32 || Character.isSurrogate(c)) {
+                            else if (c < 32 || java.lang.Character.isSurrogate(c)) {
                                 result.append((char) 92).append('u');
-                                String hex = Integer.toHexString(c);
+                                java.lang.String hex = java.lang.Integer.toHexString(c);
                                 for (int j = hex.length(); j < 4; j++) result.append('0');
                                 result.append(hex);
                             } else result.append(c);
