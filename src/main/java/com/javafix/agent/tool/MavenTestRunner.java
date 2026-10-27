@@ -9,6 +9,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 在目标项目根目录执行 {@code mvn test}，把测试结果带回给 Agent。
@@ -72,6 +73,10 @@ public class MavenTestRunner implements TestRunner {
 
     @Override
     public TestResult run(Path projectPath, String testSelector) {
+        return run(projectPath, testSelector, Map.of());
+    }
+
+    public TestResult run(Path projectPath, String testSelector, Map<String, String> environmentOverrides) {
 
         if (!Files.isDirectory(projectPath)) {
             return new TestResult(
@@ -85,7 +90,8 @@ public class MavenTestRunner implements TestRunner {
 
         try {
             ProcessRunner.Result result =
-                    ProcessRunner.run(mavenCommand(projectPath, testSelector), projectPath, log, timeout);
+                    ProcessRunner.run(mavenCommand(projectPath, testSelector), projectPath, log, timeout,
+                            environmentOverrides);
 
             if (result.timedOut()) {
                 return new TestResult(

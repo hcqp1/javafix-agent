@@ -8,6 +8,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.time.Duration;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -46,6 +48,37 @@ class MavenCommandTest {
 
     private static String wrapperName() {
         return isWindows() ? "mvnw.cmd" : "mvnw";
+    }
+
+    @Test
+    void passesEnvironmentToChildWithoutChangingParentOrImmutableOverrides() throws Exception {
+        String before = System.getenv("JAVAFIX_TRACE_FILE");
+        Map<String, String> overrides = Map.of("JAVAFIX_TRACE_FILE", "trace-path");
+        String script = isWindows() ? "echo %JAVAFIX_TRACE_FILE% & echo %PATH%" : "printf '%s\\n%s' \"$JAVAFIX_TRACE_FILE\" \"$PATH\"";
+        ProcessRunner.Result result = ProcessRunner.run(ProcessRunner.shellCommand(script), project,
+                project.resolve("child.log"), Duration.ofSeconds(10), overrides);
+        assertEquals(0, result.exitCode());
+        assertTrue(result.output().startsWith("trace-path"));
+        assertTrue(result.output().contains(System.getenv("PATH")));
+        assertEquals(before, System.getenv("JAVAFIX_TRACE_FILE"));
+        assertEquals(Map.of("JAVAFIX_TRACE_FILE", "trace-path"), overrides);
+    }
+
+    @Test
+    void mavenOverloadPreservesSelectorAndPropagatesEnvironment() throws Exception {
+        Path wrapper = project.resolve(wrapperName());
+        Files.writeString(wrapper, isWindows()
+                ? "@echo off\r\necho %JAVAFIX_TRACE_FILE%\r\necho %*\r\n"
+                : "#!/bin/sh\nprintf '%s\\n' \"$JAVAFIX_TRACE_FILE\" \"$*\"\n");
+        if (!isWindows()) assertTrue(wrapper.toFile().setExecutable(true));
+        List<String> command = MavenTestRunner.mavenCommand(project, "FixtureTest#fails");
+        assertEquals(List.of("-Dtest=FixtureTest#fails", "-DfailIfNoTests=false", "test"),
+                command.subList(command.size() - 3, command.size()));
+        var result = new MavenTestRunner(Duration.ofSeconds(10)).run(project, "FixtureTest#fails",
+                Map.of("JAVAFIX_TRACE_FILE", "trace-path"));
+        assertEquals(0, result.getExitCode());
+        assertTrue(result.getStdout().contains("trace-path"));
+        assertTrue(result.getStdout().contains("-Dtest=FixtureTest#fails -DfailIfNoTests=false test"));
     }
 
     private static boolean isWindows() {

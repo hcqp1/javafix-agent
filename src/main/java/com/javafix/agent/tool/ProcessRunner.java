@@ -7,6 +7,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -45,8 +46,14 @@ final class ProcessRunner {
      */
     static Result run(List<String> command, Path workingDirectory, Path logFile, Duration timeout)
             throws IOException, InterruptedException {
+        return run(command, workingDirectory, logFile, timeout, Map.of());
+    }
+
+    static Result run(List<String> command, Path workingDirectory, Path logFile, Duration timeout,
+                      Map<String, String> environmentOverrides) throws IOException, InterruptedException {
 
         ProcessBuilder builder = new ProcessBuilder(command);
+        builder.environment().putAll(Map.copyOf(environmentOverrides));
 
         builder.directory(workingDirectory.toFile());
 
