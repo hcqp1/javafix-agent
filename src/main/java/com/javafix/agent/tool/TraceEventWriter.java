@@ -83,20 +83,30 @@ public final class TraceEventWriter {
                     private static void failCapture() {
                         // This already-open synchronous channel does not depend on the interrupted state lock.
                         boolean interrupted = java.lang.Thread.interrupted();
+                        boolean persisted = false;
                         try {
                             try {
                                 if (status != null) {
                                     status.seek(0);
                                     status.write(1);
+                                    persisted = true;
                                 }
                             } catch (java.lang.Throwable markerFailure) { }
                             // Keep the legacy marker as a secondary signal for older readers/diagnostics.
                             try {
                                 if (path != null) try (java.io.RandomAccessFile failed =
-                                        new java.io.RandomAccessFile(path.toString() + ".failed", "rws")) { failed.write(1); }
+                                        new java.io.RandomAccessFile(path.toString() + ".failed", "rws")) {
+                                    failed.write(1);
+                                    persisted = true;
+                                }
                             } catch (java.lang.Throwable markerFailure) { }
                         } finally {
                             if (interrupted) java.lang.Thread.currentThread().interrupt();
+                        }
+                        if (!persisted) {
+                            // This helper only runs in the isolated diagnostic Maven process launched by ProcessRunner.
+                            // Abort that child so Surefire cannot report a complete run with an unmarked trace prefix.
+                            java.lang.Runtime.getRuntime().halt(86);
                         }
                         path = null;
                     }

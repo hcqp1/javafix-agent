@@ -468,6 +468,50 @@ class TraceDiagnosticToolTest {
     }
 
     @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void abortsIsolatedRunOnlyWhenNoCaptureFailureSignalCanBePersisted(boolean blockMarker) {
+        String result = tool((p, s, e, timeout) -> {
+            report(p, "adds", "failure");
+            if (e.isEmpty()) return failed();
+            Path trace = Path.of(e.get("JAVAFIX_TRACE_FILE"));
+            Path status = Path.of(trace + ".status");
+            Path blockedMarker = Path.of(trace + ".failed");
+            Path fixture = p.resolve("UnpersistableProbe.java");
+            Files.writeString(fixture, """
+                    public class UnpersistableProbe {
+                        public static void main(String[] args) throws Exception {
+                            Probe.record("METHOD_ENTRY", 1, "", null);
+                            if (args.length > 0 && args[0].equals("block")) java.nio.file.Files.createDirectory(
+                                    java.nio.file.Paths.get(System.getenv("JAVAFIX_TRACE_FILE") + ".failed"));
+                            java.lang.reflect.Field field = Probe.class.getDeclaredField("status");
+                            field.setAccessible(true);
+                            ((java.io.RandomAccessFile) field.get(null)).close();
+                            Thread.currentThread().interrupt();
+                            Probe.record("METHOD_ENTRY", 2, "", null);
+                            if (!Thread.currentThread().isInterrupted()) throw new AssertionError("interrupt was not preserved");
+                        }
+                    }
+                    """ + TraceEventWriter.helperSource("Probe", SOURCE, "example.Calculator.add", 500, 160));
+            assertEquals(0, javax.tools.ToolProvider.getSystemJavaCompiler().run(null, null, null,
+                    "-encoding", "UTF-8", "-d", p.toString(), fixture.toString()));
+            try {
+                var run = ProcessRunner.run(List.of(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                                "-cp", p.toString(), "UnpersistableProbe", blockMarker ? "block" : ""),
+                        p, p.resolve("unpersistable.log"), Duration.ofSeconds(20), e);
+                assertEquals(blockMarker ? 86 : 0, run.exitCode(), run.output());
+                assertEquals(1, Files.readAllLines(trace).size(), "valid trace prefix should remain on disk");
+                assertArrayEquals(new byte[]{0}, Files.readAllBytes(status), "failed status write should leave the preallocated zero byte");
+                if (blockMarker) assertTrue(Files.isDirectory(blockedMarker));
+                else assertTrue(Files.isRegularFile(blockedMarker), "secondary signal should be persisted");
+                return blockMarker ? new TestResult(run.exitCode(), run.output(), "") : failed();
+            } catch (InterruptedException ex) {
+                throw new IOException(ex);
+            }
+        }).execute(ARGUMENTS);
+        noTrace(result, blockMarker ? "instrumented build failure" : "capture failed");
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"missing", "empty", "unknown", "oversized"})
     void rejectsMissingOrMalformedCaptureStatus(String defect) {
         String result = tool((p, s, e, timeout) -> {
