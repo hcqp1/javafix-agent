@@ -90,23 +90,45 @@ AgentLoop（四阶段状态机：复现 → 定位 → 修复 → 验证）
 mvn test
 ```
 
-想让它真的修一个 bug，先配置模型（以 DeepSeek 为例）：
+想让它真的修一个 bug，首次启动持续聊天模式：
 
 ```powershell
-set JAVAFIX_LLM_BASE_URL=https://api.deepseek.com/v1
-set JAVAFIX_LLM_API_KEY=你的 key
-set JAVAFIX_LLM_MODEL=deepseek-chat
+mvn -q exec:java
 ```
 
-然后指定一个项目目录和一段现象描述：
+第一次会提示输入模型 URL、模型名和 API Key；API Key 输入时不会回显，并保存在用户目录
+`~/.javafix-agent/config.json`。之后启动不需要重复输入。也可以设置完整的
+`JAVAFIX_LLM_BASE_URL`、`JAVAFIX_LLM_API_KEY`、`JAVAFIX_LLM_MODEL` 环境变量覆盖配置。
+如果没有交互式终端，请先设置这三个环境变量再启动。
+
+持续聊天命令：
+
+```text
+/project D:\some-java-project
+/new 定时消息偶尔丢失，请定位并修复
+/ask 消息发送失败时重试逻辑在哪里？
+/fix 再检查一下并发场景
+/tasks
+/resume <任务ID>
+/exit
+```
+
+`/new` 创建独立 Bug 任务；同一任务中的普通文本和 `/fix` 会继续修复，`/ask` 只允许读取和搜索代码。
+`/tasks` 列出保存的任务，`/resume` 恢复指定任务。每个任务的对话与运行轨迹分别保存在
+`~/.javafix-agent/tasks/<任务ID>/`，旧任务不会被新任务的上下文加载。
+
+恢复任务时若项目路径、Git 分支、HEAD 或工作区改动与上次记录不同，JavaFixAgent 会先展示差异并要求输入
+`continue` 或 `cancel`。输入 `continue` 只表示使用当前工作区继续，不会切回旧版本；JavaFixAgent 不会自动
+checkout、reset、stash 或覆盖代码。任务事件逐条追加；意外退出后，末尾不完整的 JSON 行会被忽略，之前完整记录保留。
+
+原有的一次性命令行入口仍可用：
 
 ```powershell
 mvn -q exec:java "-Dexec.args=D:\some-java-project 定时消息偶尔丢失，请定位并修复"
 ```
 
-运行开始时会打印记录路径。进程意外退出后，已写入的步骤和失败尝试仍可在该文件中查看；
-文件没有 `finish` 记录表示运行未正常结束。记录可能含项目源码和工具输出，请按项目资料保管。
-当前版本提供中断现场查看；重新运行时会从新任务开始。
+一次性模式会使用相同的用户目录模型配置，并继续将运行轨迹写入 `.javafix-agent/runs/*.jsonl`。
+任务事件可能包含项目源码片段和工具输出，请按项目资料保管。
 验证使用测试范围、源码指纹和用例数量作为最低限度的证据，尚未逐一核对失败用例的身份。
 
 ## 设计取舍
