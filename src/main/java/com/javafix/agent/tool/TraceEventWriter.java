@@ -104,8 +104,9 @@ public final class TraceEventWriter {
                             if (interrupted) java.lang.Thread.currentThread().interrupt();
                         }
                         if (!persisted) {
-                            // This helper only runs in the isolated diagnostic Maven process launched by ProcessRunner.
-                            // Abort that child so Surefire cannot report a complete run with an unmarked trace prefix.
+                            // This helper runs only in the diagnostic test JVM under the Maven/Surefire process
+                            // tree launched by ProcessRunner. Halt this JVM, never the JavaFixAgent host; a Maven
+                            // parent may report the abnormal test-fork termination as a build failure.
                             java.lang.Runtime.getRuntime().halt(86);
                         }
                         path = null;
