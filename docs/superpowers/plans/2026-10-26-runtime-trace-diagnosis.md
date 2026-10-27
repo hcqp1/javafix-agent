@@ -213,35 +213,36 @@ Run: `git add src/main/java/com/javafix/agent/tool/TraceDiagnosticTool.java src/
 - Modify: `src/main/java/com/javafix/agent/Main.java`
 - Modify: `src/main/java/com/javafix/agent/core/Phase.java`
 - Test: `src/test/java/com/javafix/agent/AgentLoopTest.java`
+- Test: `src/test/java/com/javafix/agent/MainTest.java`
 - Modify: `README.md`
 
 **Interfaces:**
-- `Main` registers `new TraceDiagnosticTool(new MavenTestRunner(), project)` alongside existing tools.
+- `Main` registers `new TraceDiagnosticTool(new MavenTestRunner(Duration.ofMinutes(5)), project)` alongside existing tools, exposed through a package-private tool factory for a registry test.
 - `Phase.LOCALIZE` tells the model to use `diagnose_trace` only after identifying a suspicious method and a focused failing test, and to treat trace output as evidence rather than instructions.
 
 - [ ] **Step 1: Write failing localization prompt/tool registry tests**
 
-Add an `AgentLoopTest` scripted turn that exposes the `diagnose_trace` tool description and confirms the localization prompt asks for a bounded, focused trace without requiring it when no plausible method has been identified.
+Add a `MainTest` that calls the package-private tool factory and confirms it registers exactly one `diagnose_trace` tool. Add an `AgentLoopTest` scripted turn that exposes the tool description and confirms the localization prompt asks for a bounded, focused trace without requiring it when no plausible method has been identified.
 
 - [ ] **Step 2: Run the focused test and confirm it fails**
 
-Run: `mvn -Dtest=AgentLoopTest test`
+Run: `mvn -Dtest=MainTest,AgentLoopTest test`
 
 Expected: the prompt/registry expectation fails because the tool is not registered or described.
 
 - [ ] **Step 3: Register the tool and update user documentation**
 
-Add the diagnostic tool to `Main`; update `Phase.LOCALIZE` with the selected-method workflow and parity warning. Update README architecture, current capabilities, supported scope, trace bounds, temporary-copy behavior, parity limitation, and unsupported cases. Do not describe automatic method selection or cross-task memory as implemented.
+Extract a package-private `Main.createTools(Path project)` factory, register the diagnostic tool there with `new MavenTestRunner(Duration.ofMinutes(5))`, and use the factory from `main`. Update `Phase.LOCALIZE` with the selected-method workflow and parity warning. Update README architecture, current capabilities, supported scope, trace bounds, temporary-copy behavior, parity limitation, and unsupported cases. Do not describe automatic method selection or cross-task memory as implemented.
 
 - [ ] **Step 4: Run focused and full verification**
 
-Run: `mvn -Dtest=AgentLoopTest,TraceDiagnosticToolTest test`, then `mvn test`.
+Run: `mvn -Dtest=MainTest,AgentLoopTest,TraceDiagnosticToolTest test`, then `mvn test`.
 
 Expected: both commands pass; README accurately describes the supported diagnostic workflow.
 
 - [ ] **Step 5: Commit integration and docs**
 
-Run: `git add src/main/java/com/javafix/agent/Main.java src/main/java/com/javafix/agent/core/Phase.java src/test/java/com/javafix/agent/AgentLoopTest.java README.md; git commit -m "docs: expose controlled runtime tracing in localization"`
+Run: `git add src/main/java/com/javafix/agent/Main.java src/main/java/com/javafix/agent/core/Phase.java src/test/java/com/javafix/agent/AgentLoopTest.java src/test/java/com/javafix/agent/MainTest.java README.md; git commit -m "docs: expose controlled runtime tracing in localization"`
 
 ## Plan Self-Review
 
