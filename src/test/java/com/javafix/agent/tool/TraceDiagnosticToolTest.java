@@ -256,6 +256,13 @@ class TraceDiagnosticToolTest {
                 if (stage.equals(e.isEmpty() ? "baseline" : "instrumented")) {
                     Path reports = p.resolve("target/surefire-reports");
                     if (linkKind.equals("target-directory")) {
+                        if (!e.isEmpty()) {
+                            Path traceFile = Path.of(e.get("JAVAFIX_TRACE_FILE"));
+                            Files.deleteIfExists(traceFile);
+                            Files.deleteIfExists(Path.of(traceFile + ".state"));
+                            Files.deleteIfExists(Path.of(traceFile + ".failed"));
+                            Files.deleteIfExists(Path.of(traceFile + ".status"));
+                        }
                         Files.deleteIfExists(p.resolve("target"));
                         Files.createSymbolicLink(p.resolve("target"), external.resolve("target"));
                     } else if (linkKind.equals("reports-directory")) {
