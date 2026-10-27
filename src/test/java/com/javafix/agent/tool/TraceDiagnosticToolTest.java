@@ -115,6 +115,7 @@ class TraceDiagnosticToolTest {
                 assertFalse(Files.exists(trace));
                 assertFalse(Files.exists(Path.of(trace + ".state")));
                 assertFalse(Files.exists(Path.of(trace + ".failed")));
+                assertArrayEquals(new byte[]{0}, Files.readAllBytes(Path.of(trace + ".status")));
                 assertTrue(Files.readString(project.resolve(SOURCE)).contains("final class JavafixTrace"));
                 trace(environment, 2, 0);
             } else {
@@ -423,16 +424,22 @@ class TraceDiagnosticToolTest {
         noTrace(result, "trace unavailable");
     }
 
-    @Test
-    void rejectsWriterFailureAfterAValidPrefix() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void rejectsWriterFailureAfterAValidPrefix(boolean blockNewMarker) {
         String result = tool((p, s, e, timeout) -> {
             report(p, "adds", "failure");
             if (!e.isEmpty()) {
+                Path status = Path.of(e.get("JAVAFIX_TRACE_FILE") + ".status");
+                // Also lets the pre-fix helper demonstrate that it leaves preallocated status healthy.
+                if (!Files.exists(status)) Files.write(status, new byte[]{0});
                 Path fixture = p.resolve("InterruptedProbe.java");
                 Files.writeString(fixture, """
                         public class InterruptedProbe {
-                            public static void main(String[] args) {
+                            public static void main(String[] args) throws Exception {
                                 Probe.record("METHOD_ENTRY", 1, "", null);
+                                if (args[0].equals("block")) java.nio.file.Files.createDirectory(
+                                        java.nio.file.Paths.get(System.getenv("JAVAFIX_TRACE_FILE") + ".failed"));
                                 Thread.currentThread().interrupt();
                                 Probe.record("METHOD_ENTRY", 2, "", null);
                                 if (!Thread.currentThread().isInterrupted()) throw new AssertionError("interrupt lost");
@@ -443,16 +450,41 @@ class TraceDiagnosticToolTest {
                         "-encoding", "UTF-8", "-d", p.toString(), fixture.toString()));
                 try {
                     var run = ProcessRunner.run(List.of(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-                            "-cp", p.toString(), "InterruptedProbe"), p, p.resolve("probe.log"), Duration.ofSeconds(20), e);
+                            "-cp", p.toString(), "InterruptedProbe", blockNewMarker ? "block" : ""), p, p.resolve("probe.log"), Duration.ofSeconds(20), e);
                     assertEquals(0, run.exitCode(), run.output());
                 } catch (InterruptedException ex) { throw new IOException(ex); }
                 assertEquals(1, Files.readAllLines(Path.of(e.get("JAVAFIX_TRACE_FILE"))).size());
                 assertEquals(24, Files.size(Path.of(e.get("JAVAFIX_TRACE_FILE") + ".state")));
                 assertTrue(Files.exists(Path.of(e.get("JAVAFIX_TRACE_FILE") + ".failed")));
+                assertArrayEquals(new byte[]{1}, Files.readAllBytes(status), "already-open status must record failure");
+                if (blockNewMarker) {
+                    // Remove the obstruction to prove rejection comes from status, not the legacy marker path.
+                    Files.delete(Path.of(e.get("JAVAFIX_TRACE_FILE") + ".failed"));
+                }
             }
             return failed();
         }).execute(ARGUMENTS);
-        noTrace(result, "capture failed");
+        noTrace(result, blockNewMarker ? "capture status" : "capture failed");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"missing", "empty", "unknown", "oversized"})
+    void rejectsMissingOrMalformedCaptureStatus(String defect) {
+        String result = tool((p, s, e, timeout) -> {
+            report(p, "adds", "failure");
+            if (!e.isEmpty()) {
+                trace(e, 1, 0);
+                Path status = Path.of(e.get("JAVAFIX_TRACE_FILE") + ".status");
+                if (defect.equals("missing")) Files.deleteIfExists(status);
+                else Files.write(status, switch (defect) {
+                    case "empty" -> new byte[0];
+                    case "unknown" -> new byte[]{2};
+                    default -> new byte[]{0, 0};
+                });
+            }
+            return failed();
+        }).execute(ARGUMENTS);
+        noTrace(result, "capture status");
     }
 
     @Test

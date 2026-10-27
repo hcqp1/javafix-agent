@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -180,6 +181,9 @@ public final class TraceDiagnosticTool extends ProjectTool {
         Files.deleteIfExists(traceFile);
         Files.deleteIfExists(Path.of(traceFile + ".state"));
         Files.deleteIfExists(Path.of(traceFile + ".failed"));
+        Path statusFile = Path.of(traceFile + ".status");
+        Files.deleteIfExists(statusFile);
+        Files.write(statusFile, new byte[]{0}, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
         if (expired(started)) return failure("overall deadline", "No time remains for instrumented tests");
         TestResult traced = runner.run(workspace.instrumentedRoot(), arguments.get("test"),
                 Map.of("JAVAFIX_TRACE_FILE", traceFile.toString()), remainingBudget(started));
@@ -295,6 +299,12 @@ public final class TraceDiagnosticTool extends ProjectTool {
         if (Files.exists(Path.of(file + ".failed"), LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("capture failed; trace discarded");
         }
+        Path statusFile = Path.of(file + ".status");
+        if (!Files.isRegularFile(statusFile, LinkOption.NOFOLLOW_LINKS) || Files.size(statusFile) != 1) {
+            throw new IOException("capture status missing or malformed; trace discarded");
+        }
+        byte status = Files.readAllBytes(statusFile)[0];
+        if (status != 0) throw new IOException("capture status records failure; trace discarded");
         if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS) || Files.size(file) > 1024 * 1024) {
             throw new IOException("Missing or oversized trace");
         }

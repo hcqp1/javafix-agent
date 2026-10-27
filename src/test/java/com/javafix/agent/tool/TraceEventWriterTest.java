@@ -140,6 +140,7 @@ class TraceEventWriterTest {
                 }
                 """, TraceEventWriter.helperSource("OtherProbe", "src/Fixture.java", "run", 7, 20));
         List<Process> children = new ArrayList<>();
+        Files.write(directory.resolve("trace.jsonl.status"), new byte[]{0});
         try {
             for (int i = 0; i < 3; i++) {
                 ProcessBuilder child = new ProcessBuilder(javaCommand());
@@ -213,6 +214,8 @@ class TraceEventWriterTest {
     }
 
     private ProcessRunner.Result run(Map<String, String> environment) throws Exception {
+        String traceFile = environment.get("JAVAFIX_TRACE_FILE");
+        if (traceFile != null) Files.write(Path.of(traceFile + ".status"), new byte[]{0});
         return ProcessRunner.run(javaCommand(), directory, directory.resolve("child.log"),
                 Duration.ofSeconds(20), environment);
     }

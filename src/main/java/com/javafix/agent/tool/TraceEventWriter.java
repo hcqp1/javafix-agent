@@ -23,12 +23,15 @@ public final class TraceEventWriter {
                     private static java.lang.String monitor;
                     private static java.io.RandomAccessFile state;
                     private static java.io.RandomAccessFile trace;
+                    private static java.io.RandomAccessFile status;
                     static {
                         try {
                             java.lang.String configured = java.lang.System.getenv("JAVAFIX_TRACE_FILE");
                             if (configured != null && !configured.isEmpty()) {
                                 path = java.nio.file.Paths.get(configured);
                                 monitor = ("javafix.trace:" + path.toFile().getCanonicalPath()).intern();
+                                // The orchestrator preallocates this independent status channel before Maven starts.
+                                status = new java.io.RandomAccessFile(path.toString() + ".status", "rws");
                             }
                         } catch (java.lang.Throwable ignored) { failCapture(); }
                     }
@@ -78,14 +81,23 @@ public final class TraceEventWriter {
                         }
                     }
                     private static void failCapture() {
-                        // This separate synchronous file does not depend on the interrupted channel or its lock.
+                        // This already-open synchronous channel does not depend on the interrupted state lock.
+                        boolean interrupted = java.lang.Thread.interrupted();
                         try {
-                            if (path != null) {
-                                try (java.io.RandomAccessFile failed = new java.io.RandomAccessFile(path.toString() + ".failed", "rws")) {
-                                    failed.write(1);
+                            try {
+                                if (status != null) {
+                                    status.seek(0);
+                                    status.write(1);
                                 }
-                            }
-                        } catch (java.lang.Throwable markerFailure) { }
+                            } catch (java.lang.Throwable markerFailure) { }
+                            // Keep the legacy marker as a secondary signal for older readers/diagnostics.
+                            try {
+                                if (path != null) try (java.io.RandomAccessFile failed =
+                                        new java.io.RandomAccessFile(path.toString() + ".failed", "rws")) { failed.write(1); }
+                            } catch (java.lang.Throwable markerFailure) { }
+                        } finally {
+                            if (interrupted) java.lang.Thread.currentThread().interrupt();
+                        }
                         path = null;
                     }
                     private static java.lang.String scalar(java.lang.Object value) {
