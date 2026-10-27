@@ -21,3 +21,12 @@
 - Changes remain within Task 6 files plus this report. No automatic method selection, Gradle support, or cross-task memory is introduced.
 - The documented parity check compares sorted per-test class/name/outcome signatures; it does not assert assertion details, order, or environmental equivalence.
 
+
+## Task 6 review fixes
+
+- Added an AgentLoop prompt assertion for the unique `TraceDiagnosticTool.description()` text (`when all per-test identities and outcomes match`) and for the bounded-use guidance. The strengthened test also checks the prompt's exact parity caveat.
+- Corrected `Phase.LOCALIZE` and README parity language: the diagnostic returns only when per-test identities and outcome categories match; this does not establish assertion-detail or environment equivalence. Added `diagnose_trace` to the README's current tool list.
+- TDD RED: the strengthened prompt test failed against the old parity wording. After updating the prompt wording, its targeted run passed: `mvn '-Dtest=AgentLoopTest#localizationPromptOffersBoundedTraceOnlyAfterMethodAndFocusedTestAreKnown' test` — 1 test, 0 failures/errors.
+- Review-fix focused integration run passed: `mvn '-Dtest=MainTest,AgentLoopTest,TraceDiagnosticToolTest' test` — 72 tests, 0 failures/errors, 3 skipped (13:28).
+- Review-fix full run passed: `mvn test` — 168 tests, 0 failures, 0 errors, 8 skipped (13:30).
+
