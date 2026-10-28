@@ -452,7 +452,7 @@ class AgentLoopTest {
     }
 
     @Test
-    void shouldKeepVerifyingAfterAnInconclusiveTimeout() {
+    void shouldStopWithUnverifiedReportAfterAnInconclusiveTimeout() {
         AtomicInteger calls = new AtomicInteger();
         TestRunner tests = path -> calls.getAndIncrement() == 0
                 ? new TestResult(1, "Tests run: 1, Failures: 1, Errors: 0", "")
@@ -466,9 +466,9 @@ class AgentLoopTest {
 
         String answer = loop.run("测试超时");
 
-        assertTrue(answer.contains("没能完成"), answer);
-        assertTrue(llm.prompts().get(5).contains("当前阶段：验证"));
-        assertFalse(llm.prompts().get(5).contains("失败尝试"));
+        assertTrue(answer.contains("验证阶段没有得到测试结论"), answer);
+        assertTrue(answer.contains("测试超时"), answer);
+        assertEquals(5, llm.prompts().size(), "超时后不应继续调用模型或尝试修复");
     }
 
     @Test
@@ -519,7 +519,7 @@ class AgentLoopTest {
     }
 
     @Test
-    void shouldNotCountMavenInfrastructureFailureAsAFailedFix() {
+    void shouldStopWithUnverifiedReportOnMavenInfrastructureFailure() {
         AtomicInteger calls = new AtomicInteger();
         TestRunner tests = path -> calls.getAndIncrement() == 0
                 ? new TestResult(1, "Tests run: 1, Failures: 1, Errors: 0", "")
@@ -533,9 +533,9 @@ class AgentLoopTest {
 
         String answer = loop.run("构建失败");
 
-        assertTrue(answer.contains("没能完成"), answer);
-        assertTrue(llm.prompts().get(5).contains("当前阶段：验证"));
-        assertFalse(llm.prompts().get(5).contains("失败尝试"));
+        assertTrue(answer.contains("验证阶段没有得到测试结论"), answer);
+        assertTrue(answer.contains("测试环境失败"), answer);
+        assertEquals(5, llm.prompts().size(), "环境失败后不应继续调用模型或尝试修复");
     }
 
     @Test

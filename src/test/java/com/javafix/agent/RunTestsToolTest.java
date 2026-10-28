@@ -48,6 +48,40 @@ class RunTestsToolTest {
     }
 
     @Test
+    void shouldClassifyUnsupportedSecurityManagerAsEnvironmentFailure() {
+        RunTestsTool tool = new RunTestsTool(path -> new TestResult(1,
+                "[java] java.lang.UnsupportedOperationException: Setting a Security Manager is not supported\n"
+                        + "[ERROR] BUILD FAILURE", ""), project);
+
+        String observation = tool.execute(Map.of());
+
+        assertTrue(observation.startsWith("测试环境失败"), observation);
+        assertFalse(observation.startsWith("测试未通过"), observation);
+    }
+
+    @Test
+    void shouldClassifyBuildFailureWithoutSurefireResultsAsInconclusive() {
+        RunTestsTool tool = new RunTestsTool(path -> new TestResult(1,
+                "[ERROR] COMPILATION ERROR\n[ERROR] BUILD FAILURE", ""), project);
+
+        String observation = tool.execute(Map.of());
+
+        assertTrue(observation.startsWith("构建失败，未得到测试结论"), observation);
+    }
+
+    @Test
+    void shouldKeepSurefireAssertionFailureAsTestFailure() {
+        RunTestsTool tool = new RunTestsTool(path -> new TestResult(1,
+                "[ERROR] ExampleTest.case <<< FAILURE!\n"
+                        + "[ERROR] Tests run: 1, Failures: 1, Errors: 0\n[ERROR] BUILD FAILURE", ""), project);
+
+        String observation = tool.execute(Map.of());
+
+        assertTrue(observation.startsWith("测试未通过"), observation);
+        assertFalse(observation.startsWith("测试环境失败"), observation);
+    }
+
+    @Test
     void shouldPrioritizeFailureAndUsefulStackFramesOverMavenNoise() {
         StringBuilder log = new StringBuilder();
         for (int i = 0; i < 50; i++) {
