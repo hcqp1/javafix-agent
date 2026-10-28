@@ -33,6 +33,12 @@ public class RunTestsTool extends ProjectTool {
             "<<< (?:FAILURE|ERROR)!|AssertionFailed|expected:|Caused by:|COMPILATION ERROR|(?:Exception|Error):");
     private static final Pattern STACK_FRAME = Pattern.compile(
             "^\\s*(?:\\[ERROR\\]\\s*)?at\\s+([\\w.$]+)\\([^)]*\\.java:\\d+\\)");
+    private static final Pattern ENVIRONMENT_FAILURE = Pattern.compile(
+            "Setting a Security Manager is not supported|Unsupported class file major version|"
+                    + "UnsupportedClassVersionError|Could not resolve dependencies|Could not transfer artifact|"
+                    + "PluginResolutionException|JAVA_HOME.*(?:not defined|incorrect)|"
+                    + "Maven version.*(?:required|must be)|requires Maven version",
+            Pattern.CASE_INSENSITIVE);
 
     private final TestRunner testRunner;
 
@@ -59,7 +65,8 @@ public class RunTestsTool extends ProjectTool {
 
     @Override
     public String description() {
-        return "在仓库根目录执行 mvn test，返回构建与测试的输出。"
+        return "在仓库根目录执行 Maven 测试，并区分测试通过、测试用例失败、构建/环境失败、超时和未启动。"
+                + "只有出现测试用例失败时，才可将结果作为 Bug 复现证据；构建或环境失败不是测试失败。"
                 + "参数：test（可选，只跑指定的测试类，例如 FooTest；真实仓库务必用它把范围收窄，"
                 + "否则一次全量测试可能几十分钟）。";
     }
@@ -73,13 +80,20 @@ public class RunTestsTool extends ProjectTool {
 
         StringBuilder observation = new StringBuilder();
 
+        String log = (result.getStdout() == null ? "" : result.getStdout()) + "\n"
+                + (result.getStderr() == null ? "" : result.getStderr());
+        boolean hasTestReport = log.contains("Tests run:");
         if (result.isSuccess()) {
             observation.append("测试通过。");
         } else if (result.getExitCode() == TestResult.EXIT_TIMEOUT) {
             // 超时和"跑完了但失败"是两回事：前者根本没有结论，不能当成失败证据
-            observation.append("测试超时，没有跑完。");
+            observation.append("测试超时，没有跑完。环境/耗时问题，不是测试失败结论。");
         } else if (result.getExitCode() == TestResult.EXIT_START_FAILURE) {
-            observation.append("测试未启动，没有拿到测试结果。");
+            observation.append("测试未启动，没有拿到测试结果。请检查构建工具和项目路径。");
+        } else if (ENVIRONMENT_FAILURE.matcher(log).find()) {
+            observation.append("测试环境失败，未得到测试结论。命中工具链/依赖兼容错误；不要把它当成 Bug 复现。");
+        } else if (!hasTestReport && log.contains("BUILD FAILURE")) {
+            observation.append("构建失败，未得到测试结论。测试用例尚未运行；请先处理构建错误。");
         } else {
             observation.append("测试未通过。");
         }

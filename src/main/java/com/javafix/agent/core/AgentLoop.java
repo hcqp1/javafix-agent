@@ -297,6 +297,14 @@ public class AgentLoop {
                 }
             }
 
+            if (ranTests && hasNoTestConclusion(observation)
+                    && (phase == Phase.REPRODUCE || phase == Phase.VERIFY)) {
+                String stage = phase == Phase.REPRODUCE ? "复现" : "验证";
+                return "任务暂停：" + stage + "阶段没有得到测试结论。\n"
+                        + "测试状态：" + firstLine(observation) + "\n"
+                        + "请先解决项目构建/测试环境问题，再恢复这个任务。完整日志保存在目标项目的 target/javafix-mvn-test.log。";
+            }
+
             // "产出"指的是写文件或跑测试；只是搜索、读文件不算——那样可以永远探索下去
             unproductiveSteps = (editedFile || ranTests) ? 0 : unproductiveSteps + 1;
 
@@ -393,6 +401,13 @@ public class AgentLoop {
                 && observation.startsWith("测试通过")
                 && PASSING_TEST.matcher(observation).find()
                 && !FAILING_TEST.matcher(observation).find();
+    }
+
+    private static boolean hasNoTestConclusion(String observation) {
+        return observation != null && (observation.startsWith("测试环境失败")
+                || observation.startsWith("构建失败，未得到测试结论")
+                || observation.startsWith("测试未启动")
+                || observation.startsWith("测试超时"));
     }
 
     private static long countTests(String observation) {
