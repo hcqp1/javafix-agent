@@ -1,5 +1,9 @@
 package com.javafix.agent;
 
+import com.javafix.agent.chat.ChatSession;
+import com.javafix.agent.config.ModelConfig;
+import com.javafix.agent.config.ModelConfigStore;
+import com.javafix.agent.task.TaskStore;
 import com.javafix.agent.core.AgentLoop;
 import com.javafix.agent.llm.LlmClient;
 import com.javafix.agent.llm.OpenAiCompatibleLlmClient;
@@ -14,6 +18,9 @@ import com.javafix.agent.tool.TraceDiagnosticTool;
 import com.javafix.agent.tool.WriteFileTool;
 
 import java.io.IOException;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.io.PrintWriter;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -22,6 +29,7 @@ import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 命令行入口。
@@ -31,7 +39,7 @@ import java.util.List;
  * </pre>
  *
  * <p>模型配置从环境变量读取，不写进代码也不进仓库：
- * {@code JAVAFIX_LLM_BASE_URL}、{@code JAVAFIX_LLM_API_KEY}、{@code JAVAFIX_LLM_MODEL}。
+ * 持续聊天模式从用户目录配置读取模型设置；环境变量可覆盖配置文件。
  */
 public class Main {
 
@@ -40,6 +48,11 @@ public class Main {
     private static final String ENV_MODEL = "JAVAFIX_LLM_MODEL";
 
     public static void main(String[] args) {
+
+        if (args.length == 0) {
+            runChat();
+            return;
+        }
 
         if (args.length < 2) {
             usage();
@@ -53,15 +66,11 @@ public class Main {
             return;
         }
 
-        String baseUrl = System.getenv(ENV_BASE_URL);
-        String apiKey = System.getenv(ENV_API_KEY);
-        String model = System.getenv(ENV_MODEL);
-
-        if (isBlank(baseUrl) || isBlank(apiKey) || isBlank(model)) {
-            System.err.println("缺少模型配置，请先设置这三个环境变量：");
-            System.err.println("  " + ENV_BASE_URL + "  例如 https://api.deepseek.com/v1");
-            System.err.println("  " + ENV_API_KEY + "    模型服务的 API Key");
-            System.err.println("  " + ENV_MODEL + "      例如 deepseek-chat");
+        ModelConfig config;
+        try {
+            config = resolveModelConfig(false);
+        } catch (IOException | IllegalStateException e) {
+            System.err.println(e.getMessage());
             return;
         }
 
@@ -76,7 +85,7 @@ public class Main {
             return;
         }
 
-        LlmClient llmClient = new OpenAiCompatibleLlmClient(baseUrl, apiKey, model);
+        LlmClient llmClient = new OpenAiCompatibleLlmClient(config.baseUrl(), config.apiKey(), config.model());
 
         List<Tool> tools = createTools(project);
 
@@ -91,7 +100,7 @@ public class Main {
 
         System.out.println("项目：" + project);
         System.out.println("任务：" + task);
-        System.out.println("模型：" + model);
+        System.out.println("模型：" + config.model());
         System.out.println("运行记录：" + journal.path());
 
         long startedAt = System.nanoTime();
@@ -123,7 +132,7 @@ public class Main {
         }
     }
 
-    static List<Tool> createTools(Path project) {
+    public static List<Tool> createTools(Path project) {
         return List.of(
                 new ReadFileTool(project),
                 new ReplaceInFileTool(project),
@@ -154,7 +163,8 @@ public class Main {
     private static void usage() {
         System.out.println("用法：mvn -q exec:java -Dexec.args=\"<项目目录> <Bug 描述>\"");
         System.out.println();
-        System.out.println("需要先在环境变量里配置模型：");
+        System.out.println("不带参数启动持续聊天：mvn -q exec:java");
+        System.out.println("模型设置保存在用户目录 .javafix-agent/config.json；也支持环境变量覆盖：");
         System.out.println("  set " + ENV_BASE_URL + "=https://api.deepseek.com/v1");
         System.out.println("  set " + ENV_API_KEY + "=你的 key");
         System.out.println("  set " + ENV_MODEL + "=deepseek-chat");
@@ -162,5 +172,70 @@ public class Main {
 
     private static boolean isBlank(String value) {
         return value == null || value.isBlank();
+    }
+
+    private static void runChat() {
+        try {
+            ModelConfig config = resolveModelConfig(true);
+            Path dataDirectory = Path.of(System.getProperty("user.home"), ".javafix-agent");
+            ChatSession session = new ChatSession(
+                    new BufferedReader(new InputStreamReader(System.in)),
+                    new PrintWriter(System.out, true),
+                    new TaskStore(dataDirectory.resolve("tasks")),
+                    new OpenAiCompatibleLlmClient(config.baseUrl(), config.apiKey(), config.model()));
+            session.run();
+        } catch (IOException | IllegalStateException e) {
+            System.err.println(e.getMessage());
+        }
+    }
+
+    private static ModelConfig resolveModelConfig(boolean allowInteractiveSetup) throws IOException {
+        Path dataDirectory = Path.of(System.getProperty("user.home"), ".javafix-agent");
+        ModelConfigStore store = new ModelConfigStore(dataDirectory.resolve("config.json"));
+        ModelConfig saved = store.load().orElse(null);
+        Map<String, String> environment = System.getenv();
+
+        if (saved != null) {
+            try {
+                return ModelConfigStore.fromEnvironment(saved, environment);
+            } catch (IllegalStateException e) {
+                // A complete saved config should make this unreachable; report the config issue plainly.
+                throw new IOException("用户目录中的模型配置无效，请检查 .javafix-agent/config.json", e);
+            }
+        }
+
+        if (hasEnvironmentConfig(environment)) {
+            ModelConfig fromEnvironment = ModelConfigStore.fromEnvironment(null, environment);
+            store.save(fromEnvironment);
+            return fromEnvironment;
+        }
+
+        if (!allowInteractiveSetup) {
+            throw new IllegalStateException("尚未配置模型。请不带参数启动 JavaFixAgent 完成首次配置，"
+                    + "或设置 JAVAFIX_LLM_BASE_URL、JAVAFIX_LLM_API_KEY、JAVAFIX_LLM_MODEL。");
+        }
+
+        java.io.Console console = System.console();
+        if (console == null) {
+            throw new IllegalStateException("首次配置需要交互式终端以隐藏输入 API Key。"
+                    + "请在系统终端启动，或设置 JAVAFIX_LLM_BASE_URL、JAVAFIX_LLM_API_KEY、JAVAFIX_LLM_MODEL。");
+        }
+        String baseUrl = console.readLine("模型 API Base URL [https://api.deepseek.com/v1]: ");
+        if (isBlank(baseUrl)) baseUrl = "https://api.deepseek.com/v1";
+        String model = console.readLine("模型名称 [deepseek-chat]: ");
+        if (isBlank(model)) model = "deepseek-chat";
+        char[] secret = console.readPassword("API Key（输入不回显）: ");
+        if (secret == null || secret.length == 0) throw new IllegalStateException("API Key 不能为空。");
+        ModelConfig config = new ModelConfig(baseUrl, new String(secret), model);
+        java.util.Arrays.fill(secret, '\0');
+        store.save(config);
+        System.out.println("模型配置已保存到用户目录 .javafix-agent/config.json。");
+        return config;
+    }
+
+    private static boolean hasEnvironmentConfig(Map<String, String> environment) {
+        return !isBlank(environment.get(ENV_BASE_URL))
+                && !isBlank(environment.get(ENV_API_KEY))
+                && !isBlank(environment.get(ENV_MODEL));
     }
 }

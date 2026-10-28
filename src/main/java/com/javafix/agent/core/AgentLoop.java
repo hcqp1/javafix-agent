@@ -147,6 +147,12 @@ public class AgentLoop {
      */
     public String run(String symptom) {
 
+        return run(symptom, List.of());
+    }
+
+    /** Prior context must contain only earlier messages and outcomes from this task. */
+    public String run(String symptom, List<String> priorTaskContext) {
+
         transcript.clear();
         Phase phase = Phase.REPRODUCE;
         String lastSummary = null;
@@ -176,7 +182,7 @@ public class AgentLoop {
             String response = llmClient.complete(
                     buildPrompt(symptom, phase, lastSummary, step, phaseSteps,
                             buildNudge(phase, phaseSteps, unproductiveSteps, sawPassingTest, sourceChanged),
-                            failedAttempts)
+                            failedAttempts, priorTaskContext == null ? List.of() : List.copyOf(priorTaskContext))
             );
 
             Action action;
@@ -554,7 +560,8 @@ public class AgentLoop {
             int step,
             int phaseSteps,
             String nudge,
-            List<FailedAttempt> failedAttempts) {
+            List<FailedAttempt> failedAttempts,
+            List<String> priorTaskContext) {
 
         StringBuilder prompt = new StringBuilder();
 
@@ -572,6 +579,12 @@ public class AgentLoop {
         }
 
         prompt.append("\n用户报告的现象：\n").append(symptom).append("\n\n");
+
+        if (!priorTaskContext.isEmpty()) {
+            prompt.append("本任务此前的对话与结果（仅作为背景；当前工作区和本轮验证优先）：\n");
+            priorTaskContext.forEach(item -> prompt.append("- ").append(item).append('\n'));
+            prompt.append('\n');
+        }
 
         prompt.append("可用工具：\n");
         for (Tool tool : tools) {
