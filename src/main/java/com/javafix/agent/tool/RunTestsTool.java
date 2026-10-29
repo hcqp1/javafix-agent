@@ -27,6 +27,9 @@ public class RunTestsTool extends ProjectTool {
     private static final int MAX_FAILURE_CASES = 2;
 
     private static final Pattern FAILED_COUNT = Pattern.compile("Failures: [1-9]|Errors: [1-9]");
+    private static final Pattern FAILED_TEST_SUMMARY = Pattern.compile(
+            "Tests run: [1-9][0-9]*, Failures: [1-9][0-9]*"
+                    + "|Tests run: [1-9][0-9]*, Failures: [0-9]+, Errors: [1-9][0-9]*");
     private static final Pattern PASSING_COUNT =
             Pattern.compile("Tests run: [1-9][0-9]*, Failures: 0, Errors: 0");
     private static final Pattern FAILURE_DETAIL = Pattern.compile(
@@ -83,6 +86,7 @@ public class RunTestsTool extends ProjectTool {
         String log = (result.getStdout() == null ? "" : result.getStdout()) + "\n"
                 + (result.getStderr() == null ? "" : result.getStderr());
         boolean hasTestReport = log.contains("Tests run:");
+        boolean hasFailedTest = hasFailedTestSummary(log);
         if (result.isSuccess()) {
             observation.append("测试通过。");
         } else if (result.getExitCode() == TestResult.EXIT_TIMEOUT) {
@@ -90,6 +94,8 @@ public class RunTestsTool extends ProjectTool {
             observation.append("测试超时，没有跑完。环境/耗时问题，不是测试失败结论。");
         } else if (result.getExitCode() == TestResult.EXIT_START_FAILURE) {
             observation.append("测试未启动，没有拿到测试结果。请检查构建工具和项目路径。");
+        } else if (hasFailedTest) {
+            observation.append("测试未通过。");
         } else if (ENVIRONMENT_FAILURE.matcher(log).find()) {
             observation.append("测试环境失败，未得到测试结论。命中工具链/依赖兼容错误；不要把它当成 Bug 复现。");
         } else if (!hasTestReport && log.contains("BUILD FAILURE")) {
@@ -105,6 +111,10 @@ public class RunTestsTool extends ProjectTool {
         }
 
         return observation.toString();
+    }
+
+    private static boolean hasFailedTestSummary(String log) {
+        return log.lines().anyMatch(line -> FAILED_TEST_SUMMARY.matcher(line).find());
     }
 
     /** 失败摘要和项目调用栈先于插件噪声，避免固定行数截断时丢掉定位证据。 */

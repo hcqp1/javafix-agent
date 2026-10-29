@@ -60,6 +60,27 @@ class RunTestsToolTest {
     }
 
     @Test
+    void shouldPrioritizeSurefireFailureOverJaCoCoCompatibilityWarning() {
+        String log = """
+                [WARNING] Error while instrumenting Mockito mock
+                java.lang.IllegalArgumentException: Unsupported class file major version 61
+                [ERROR] org.apache.rocketmq.client.impl.consumer.PullAPIWrapperTest.testPullKernelImplWithMissingFilterServerTableForClassFilter <<< FAILURE!
+                java.lang.AssertionError: unexpected exception type thrown; expected:<org.apache.rocketmq.client.exception.MQClientException> but was:<java.lang.NullPointerException>
+                    at org.apache.rocketmq.client.impl.consumer.PullAPIWrapperTest.assertFindFilterServerFailed(PullAPIWrapperTest.java:200)
+                [ERROR] Tests run: 2, Failures: 1, Errors: 0, Skipped: 1
+                [ERROR] BUILD FAILURE
+                """;
+        RunTestsTool tool = new RunTestsTool(path -> new TestResult(1, log, ""), project);
+
+        String observation = tool.execute(Map.of("test", "PullAPIWrapperTest"));
+
+        assertTrue(observation.startsWith("测试未通过"), observation);
+        assertFalse(observation.startsWith("测试环境失败"), observation);
+        assertTrue(observation.contains("Failures: 1"), observation);
+        assertTrue(observation.contains("NullPointerException"), observation);
+    }
+
+    @Test
     void shouldClassifyBuildFailureWithoutSurefireResultsAsInconclusive() {
         RunTestsTool tool = new RunTestsTool(path -> new TestResult(1,
                 "[ERROR] COMPILATION ERROR\n[ERROR] BUILD FAILURE", ""), project);
