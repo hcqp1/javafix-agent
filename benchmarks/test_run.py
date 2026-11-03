@@ -61,6 +61,14 @@ class BenchmarkHelpersTest(unittest.TestCase):
         self.assertFalse(status_is_successful("baseline_reproduced", baseline_only=False))
         self.assertTrue(status_is_successful("repaired", baseline_only=False))
 
+    def test_rocketmq_cases_disable_old_jacoco_agent_for_jdk17(self):
+        dataset = json.loads((Path(__file__).with_name("dataset.json")).read_text(encoding="utf-8"))
+        rocketmq_cases = [case for case in dataset["cases"] if case["repository"] == "rocketmq"]
+
+        self.assertEqual({case["id"] for case in rocketmq_cases}, {"M3", "M4"})
+        for case in rocketmq_cases:
+            self.assertIn("-Djacoco.skip=true", case["test_args"])
+
     def test_environment_failure_summary_keeps_command_and_spawn_error(self):
         result = summarize_test_run(
             {"status": "environment_failure", "exit_code": None, "elapsed_ms": 0,
