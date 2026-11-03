@@ -42,4 +42,4 @@
 
 - [x] Run `FindReferencesToolTest` and the full Java test suite.
 - [x] Document behavior and limitations, including unresolved dynamic/semantic bindings and bounded scan scope.
-- [ ] Inspect `git diff --check`, ensure the previous benchmark changes remain intact, then commit and push the stage.
+- [x] Inspect `git diff --check` and ensure the previous benchmark changes remain intact; implementation and review fixes are committed. Full test suite passes.

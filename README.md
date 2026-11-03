@@ -70,7 +70,7 @@ AgentLoop（四阶段状态机：复现 → 定位 → 修复 → 验证）
 - Context Engineering 与同类方案的对比实验
 
 `find_references` 当前使用 Java 17 语法解析，最多扫描 3000 个 Java 文件、单文件 1 MiB、每次返回最多 30 条结果。
-它依据源码中的类型声明、参数/变量类型和显式接收者产生候选，不加载 Maven/Gradle classpath，也不处理完整的继承、泛型推断或动态绑定；
+它依据源码中的类型声明、参数/变量类型、显式导入和显式接收者产生候选，不加载 Maven/Gradle classpath，也不处理通配符导入、完整的继承、泛型推断或动态绑定；
 因此结果用于缩小搜索范围，仍需用源码、测试及 `search_code` 复核。
 
 ## Maven Bug 基准
