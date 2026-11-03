@@ -205,8 +205,7 @@ public final class FindReferencesTool extends ProjectTool {
     }
 
     private static String normalizeType(String raw) {
-        String type = raw.replaceAll("<.*>", "").replace("[]", "").strip();
-        return type.substring(type.lastIndexOf('.') + 1);
+        return raw.replaceAll("<.*>", "").replace("[]", "").strip();
     }
 
     private static boolean matchesType(TypeDeclaration<?> type, String target, CompilationUnit unit) {
@@ -216,7 +215,7 @@ public final class FindReferencesTool extends ProjectTool {
     private static boolean matchesCall(MethodCallExpr call, String target, CompilationUnit unit,
                                        Map<String, String> variableTypes) {
         if (call.getScope().isEmpty()) {
-            return call.findAncestor(TypeDeclaration.class).map(owner -> matchesType(owner, target, unit)).orElse(false);
+            return matchedOwnerName(call, target, unit) != null;
         }
         return matchesReceiver(call.getScope().orElseThrow().toString(), call, target, unit, variableTypes);
     }
@@ -224,18 +223,45 @@ public final class FindReferencesTool extends ProjectTool {
     private static boolean matchesReceiver(String receiver, Node call, String target, CompilationUnit unit,
                                            Map<String, String> variableTypes) {
         String simpleTarget = simpleName(target);
-        if (receiver.equals(target) || receiver.equals(simpleTarget) || receiver.endsWith("." + simpleTarget)) return true;
         if ((receiver.equals("this") || receiver.equals("super")) && call != null) {
-            return call.findAncestor(TypeDeclaration.class).map(owner -> matchesType(owner, target, unit)).orElse(false);
+            return matchedOwnerName(call, target, unit) != null;
         }
         String lastPart = receiver.substring(receiver.lastIndexOf('.') + 1);
         String variableType = variableTypes.get(lastPart);
-        return variableType != null && variableType.equals(simpleTarget);
+        if (variableType != null && typeMatchesQuery(resolveTypeName(variableType, unit), target)) return true;
+        return typeMatchesQuery(resolveTypeName(receiver, unit), target);
+    }
+
+    private static String resolveTypeName(String name, CompilationUnit unit) {
+        String packageName = unit.getPackageDeclaration().map(declaration -> declaration.getNameAsString()).orElse("");
+        if (name.contains(".")) {
+            if (!packageName.isEmpty() && name.startsWith(packageName + ".")) return name;
+            String firstPart = name.substring(0, name.indexOf('.'));
+            if (!packageName.isEmpty() && !firstPart.isEmpty() && Character.isUpperCase(firstPart.charAt(0))) {
+                return packageName + "." + name;
+            }
+            return name;
+        }
+        for (var imported : unit.getImports()) {
+            if (!imported.isStatic() && !imported.isAsterisk()
+                    && simpleName(imported.getNameAsString()).equals(name)) {
+                return imported.getNameAsString();
+            }
+        }
+        return packageName.isEmpty() ? name : packageName + "." + name;
+    }
+
+    private static boolean typeMatchesQuery(String resolvedType, String query) {
+        return query.contains(".") ? resolvedType.equals(query) : simpleName(resolvedType).equals(query);
     }
 
     private static String matchedOwnerName(Node node, String target, CompilationUnit unit) {
-        return node.findAncestor(TypeDeclaration.class).filter(owner -> matchesType(owner, target, unit))
-                .map(owner -> qualifiedName(owner, unit)).orElse(null);
+        for (Node current = node; current != null; current = current.getParentNode().orElse(null)) {
+            if (current instanceof TypeDeclaration<?> owner && matchesType(owner, target, unit)) {
+                return qualifiedName(owner, unit);
+            }
+        }
+        return null;
     }
 
     private static String qualifiedName(TypeDeclaration<?> type, CompilationUnit unit) {

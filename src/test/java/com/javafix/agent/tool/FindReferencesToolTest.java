@@ -31,6 +31,13 @@ class FindReferencesToolTest {
                     void call(Foo foo) { foo.run(); Runnable reference = foo::run; }
                 }
                 """);
+        write("src/main/java/p/Wrong.java", """
+                package p;
+                class Wrong {
+                    void call(q.Foo other) { other.run(); }
+                }
+                """);
+        write("src/main/java/q/Foo.java", "package q; class Foo { void run() {} }");
 
         String result = tool().execute(Map.of("type", "p.Foo", "method", "run"));
 
@@ -39,6 +46,7 @@ class FindReferencesToolTest {
         assertTrue(result.contains("src/main/java/p/Foo.java:4"), result);
         assertTrue(result.contains("src/main/java/p/Caller.java:3"), result);
         assertTrue(result.contains("method-reference"), result);
+        assertTrue(!result.contains("src/main/java/p/Wrong.java"), result);
     }
 
     @Test
