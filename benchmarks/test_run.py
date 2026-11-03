@@ -1,9 +1,11 @@
 import json
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
-from run import classify_test, localization_metrics, parse_run_journal, stable_result
+from run import classify_test, localization_metrics, parse_run_journal, stable_result, status_is_successful, _run_process
 
 
 class BenchmarkHelpersTest(unittest.TestCase):
@@ -25,6 +27,7 @@ class BenchmarkHelpersTest(unittest.TestCase):
 
     def test_parses_tool_paths_from_run_journal_in_order(self):
         events = [
+            {"type": "step", "entry": "[复现] 步骤 1\n调用了工具：read_file\n参数 path = src/main/Ignored.java\n观察：文件"},
             {"type": "step", "entry": "[定位] 步骤 1\n思路：搜索\n调用了工具：search_code\n参数 query = Cache\n观察：src\\main\\A.java:15: cache"},
             {"type": "step", "entry": "[定位] 步骤 2\n思路：读取\n调用了工具：read_file\n参数 path = src/main/B.java\n观察：（src/main/B.java 第 1-10 行）"},
         ]
@@ -43,6 +46,18 @@ class BenchmarkHelpersTest(unittest.TestCase):
         self.assertEqual(result["status"], "repaired")
         self.assertNotIn("run_id", result)
         self.assertNotIn("elapsed_ms", result)
+
+    def test_baseline_reproduction_is_successful_in_baseline_only_mode(self):
+        self.assertTrue(status_is_successful("baseline_reproduced", baseline_only=True))
+        self.assertFalse(status_is_successful("baseline_reproduced", baseline_only=False))
+        self.assertTrue(status_is_successful("repaired", baseline_only=False))
+
+    def test_timed_out_process_is_terminated_and_reported(self):
+        result = _run_process([sys.executable, "-c", "import time; time.sleep(5)"],
+                              Path(__file__).parent, timeout_seconds=0.1)
+
+        self.assertTrue(result["timed_out"])
+        self.assertGreaterEqual(result["elapsed_ms"], 100)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -53,6 +54,8 @@ def parse_run_journal(path: Path) -> list[str]:
         if event.get("type") != "step":
             continue
         entry = event.get("entry", "")
+        if not entry.startswith("[定位]"):
+            continue
         if "调用了工具：read_file" in entry:
             match = re.search(r"参数 path = ([^\r\n]+)", entry)
             if match:
@@ -87,6 +90,10 @@ def stable_result(record: dict) -> dict:
     return {key: record[key] for key in ("dataset_version", "case_id", "status") if key in record}
 
 
+def status_is_successful(status: str, baseline_only: bool) -> bool:
+    return status == "repaired" or (baseline_only and status == "baseline_reproduced")
+
+
 def _git(repository: Path, *args: str, timeout: int = 60) -> subprocess.CompletedProcess:
     command = ["git", "-c", f"safe.directory={repository}", "-C", str(repository), *args]
     return subprocess.run(command, text=True, encoding="utf-8", errors="replace",
@@ -105,24 +112,45 @@ def _maven_command(project: Path, args: list[str]) -> list[str]:
     return ["mvn", *args]
 
 
-def _run(command: list[str], cwd: Path, timeout_seconds: int) -> dict:
+def _run_process(command: list[str], cwd: Path, timeout_seconds: int) -> dict:
     started = time.monotonic()
+    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+    process = subprocess.Popen(command, cwd=cwd, text=True, encoding="utf-8", errors="replace",
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               start_new_session=os.name != "nt", creationflags=creationflags)
     try:
-        result = subprocess.run(command, cwd=cwd, text=True, encoding="utf-8", errors="replace",
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                timeout=timeout_seconds)
-        output = result.stdout or ""
-        exit_code = result.returncode
+        output, _ = process.communicate(timeout=timeout_seconds)
         timed_out = False
-    except subprocess.TimeoutExpired as error:
-        output = error.stdout or ""
-        if isinstance(output, bytes):
-            output = output.decode("utf-8", errors="replace")
-        exit_code = None
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            try:
+                killed = subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                         timeout=15).returncode == 0
+                if not killed:
+                    process.kill()
+            except (OSError, subprocess.SubprocessError):
+                process.kill()
+        else:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        output, _ = process.communicate()
         timed_out = True
-    return {"exit_code": exit_code, "status": "environment_failure" if timed_out else classify_test(exit_code, output),
-            "timed_out": timed_out, "elapsed_ms": int((time.monotonic() - started) * 1000),
-            "output": output}
+    return {"exit_code": process.returncode, "timed_out": timed_out,
+            "elapsed_ms": int((time.monotonic() - started) * 1000), "output": output or ""}
+
+
+def _run(command: list[str], cwd: Path, timeout_seconds: int) -> dict:
+    try:
+        result = _run_process(command, cwd, timeout_seconds)
+        result["status"] = "environment_failure" if result["timed_out"] else classify_test(
+            result["exit_code"], result["output"])
+        return result
+    except (OSError, subprocess.SubprocessError) as error:
+        return {"exit_code": None, "status": "environment_failure", "timed_out": False,
+                "elapsed_ms": 0, "output": "", "diagnostic": str(error)}
 
 
 def _agent_metrics(output: str) -> dict:
@@ -162,16 +190,28 @@ def run_case(case: dict, dataset_version: str, repos_dir: Path, agent_dir: Path,
         record["diagnostic"] = f"repository directory not found: {case['repository']}"
         return record
 
-    identity = _git(repository, "rev-parse", "--show-toplevel")
-    revision = _git(repository, "cat-file", "-e", f"{case['bug_revision']}^{{commit}}")
+    try:
+        identity = _git(repository, "rev-parse", "--show-toplevel")
+        revision = _git(repository, "cat-file", "-e", f"{case['bug_revision']}^{{commit}}")
+    except (OSError, subprocess.SubprocessError) as error:
+        record["diagnostic"] = str(error)
+        return record
     if identity.returncode or revision.returncode:
         record["diagnostic"] = (identity.stdout if identity.returncode else revision.stdout).strip()
         return record
 
-    work_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        work_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        record["diagnostic"] = str(error)
+        return record
     with tempfile.TemporaryDirectory(prefix=f"{case['id'].lower()}-", dir=work_dir) as temporary:
         worktree = Path(temporary) / "repo"
-        added = _git(repository, "worktree", "add", "--detach", str(worktree), case["bug_revision"], timeout=180)
+        try:
+            added = _git(repository, "worktree", "add", "--detach", str(worktree), case["bug_revision"], timeout=180)
+        except (OSError, subprocess.SubprocessError) as error:
+            record["diagnostic"] = str(error)
+            return record
         if added.returncode:
             record["diagnostic"] = added.stdout.strip()
             return record
@@ -201,11 +241,13 @@ def run_case(case: dict, dataset_version: str, repos_dir: Path, agent_dir: Path,
             exec_args = f"{_quote_exec_argument(str(worktree))} {_quote_exec_argument(case['description'])}"
             command = ["mvn", "-q", "exec:java", f"-Dexec.args={exec_args}"]
             agent_started = time.monotonic()
-            agent = subprocess.run(command, cwd=agent_dir, text=True, encoding="utf-8", errors="replace",
-                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                   timeout=timeout_seconds)
-            agent_output = agent.stdout or ""
-            record["agent_process_exit_code"] = agent.returncode
+            agent = _run_process(command, agent_dir, timeout_seconds)
+            agent_output = agent["output"]
+            record["agent_process_exit_code"] = agent["exit_code"]
+            if agent["timed_out"]:
+                record["status"] = "environment_failure"
+                record["diagnostic"] = "JavaFixAgent process timed out"
+                return record
             metrics = _agent_metrics(agent_output)
             journal = metrics.pop("journal", None)
             record.update(metrics)
@@ -232,9 +274,12 @@ def run_case(case: dict, dataset_version: str, repos_dir: Path, agent_dir: Path,
             record["diagnostic"] = str(error)
             return record
         finally:
-            removed = _git(repository, "worktree", "remove", "--force", str(worktree), timeout=180)
-            if removed.returncode:
-                record["cleanup_warning"] = removed.stdout.strip()
+            try:
+                removed = _git(repository, "worktree", "remove", "--force", str(worktree), timeout=180)
+                if removed.returncode:
+                    record["cleanup_warning"] = removed.stdout.strip()
+            except (OSError, subprocess.SubprocessError) as error:
+                record["cleanup_warning"] = str(error)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -265,15 +310,19 @@ def main(argv: list[str] | None = None) -> int:
     failed = False
     with args.output.open("a", encoding="utf-8", newline="\n") as output:
         for case in cases:
-            record = run_case(case, dataset["version"], args.repos_dir.resolve(), args.agent_dir.resolve(),
-                              args.work_dir.resolve(), args.timeout_seconds, args.baseline_only)
+            try:
+                record = run_case(case, dataset["version"], args.repos_dir.resolve(), args.agent_dir.resolve(),
+                                  args.work_dir.resolve(), args.timeout_seconds, args.baseline_only)
+            except (OSError, subprocess.SubprocessError) as error:
+                record = {"dataset_version": dataset["version"], "case_id": case["id"],
+                          "name": case["name"], "status": "environment_failure", "diagnostic": str(error)}
             record["finished_at"] = datetime.now(timezone.utc).isoformat()
             record["identity"] = stable_result(record)
             output.write(json.dumps(record, ensure_ascii=False) + "\n")
             output.flush()
             print(f"{case['id']}: {record['status']}" +
                   (f" — {record['diagnostic']}" if record.get("diagnostic") else ""))
-            failed |= record["status"] != "repaired"
+            failed |= not status_is_successful(record["status"], args.baseline_only)
     print(f"JSONL results: {args.output.resolve()}")
     return 1 if failed else 0
 
