@@ -105,6 +105,7 @@ def _maven_command(project: Path, args: list[str]) -> list[str]:
         wrapper = project / "mvnw.cmd"
         if wrapper.is_file():
             return ["cmd.exe", "/d", "/c", str(wrapper), *args]
+        return ["cmd.exe", "/d", "/c", "mvn", *args]
     else:
         wrapper = project / "mvnw"
         if wrapper.is_file():
@@ -153,6 +154,17 @@ def _run(command: list[str], cwd: Path, timeout_seconds: int) -> dict:
                 "elapsed_ms": 0, "output": "", "diagnostic": str(error)}
 
 
+def summarize_test_run(result: dict, command: list[str], cwd: Path) -> dict:
+    summary = {key: result[key] for key in ("status", "exit_code", "elapsed_ms", "timed_out")}
+    summary["command"] = command
+    summary["working_directory"] = str(cwd)
+    if result.get("diagnostic"):
+        summary["diagnostic"] = result["diagnostic"]
+    if result["status"] == "environment_failure" and result.get("output"):
+        summary["output_tail"] = result["output"][-2_000:]
+    return summary
+
+
 def _agent_metrics(output: str) -> dict:
     values = {}
     model = re.search(r"模型：([^\r\n]+)", output)
@@ -177,6 +189,11 @@ def _agent_metrics(output: str) -> dict:
 
 def _quote_exec_argument(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _agent_command(agent_dir: Path, worktree: Path, description: str) -> list[str]:
+    exec_args = f"{_quote_exec_argument(str(worktree))} {_quote_exec_argument(description)}"
+    return _maven_command(agent_dir, ["-q", "exec:java", f"-Dexec.args={exec_args}"])
 
 
 def run_case(case: dict, dataset_version: str, repos_dir: Path, agent_dir: Path, work_dir: Path,
@@ -224,11 +241,15 @@ def run_case(case: dict, dataset_version: str, repos_dir: Path, agent_dir: Path,
             fixture_path.parent.mkdir(parents=True, exist_ok=True)
             fixture_path.write_text(fixture.stdout, encoding="utf-8", newline="")
 
-            baseline = _run(_maven_command(worktree, case["test_args"]), worktree, timeout_seconds)
-            record["baseline"] = {key: baseline[key] for key in ("status", "exit_code", "elapsed_ms", "timed_out")}
+            baseline_command = _maven_command(worktree, case["test_args"])
+            baseline = _run(baseline_command, worktree, timeout_seconds)
+            record["baseline"] = summarize_test_run(baseline, baseline_command, worktree)
             record["baseline_signature_matched"] = case["expected_failure"] in baseline["output"]
             if baseline["status"] == "environment_failure":
                 record["diagnostic"] = "baseline test could not produce a test result"
+                detail = baseline.get("diagnostic") or record["baseline"].get("output_tail")
+                if detail:
+                    record["diagnostic"] += f": {detail[-1_000:]}"
                 return record
             if baseline["status"] != "test_failure" or not record["baseline_signature_matched"]:
                 record["status"] = "baseline_not_reproduced"
@@ -238,8 +259,7 @@ def run_case(case: dict, dataset_version: str, repos_dir: Path, agent_dir: Path,
                 record["status"] = "baseline_reproduced"
                 return record
 
-            exec_args = f"{_quote_exec_argument(str(worktree))} {_quote_exec_argument(case['description'])}"
-            command = ["mvn", "-q", "exec:java", f"-Dexec.args={exec_args}"]
+            command = _agent_command(agent_dir, worktree, case["description"])
             agent_started = time.monotonic()
             agent = _run_process(command, agent_dir, timeout_seconds)
             agent_output = agent["output"]
@@ -260,8 +280,9 @@ def run_case(case: dict, dataset_version: str, repos_dir: Path, agent_dir: Path,
                     parse_run_journal(journal), case["key_files"])
             record["agent_wall_elapsed_ms"] = int((time.monotonic() - agent_started) * 1000)
 
-            final = _run(_maven_command(worktree, case["test_args"]), worktree, timeout_seconds)
-            record["final_test"] = {key: final[key] for key in ("status", "exit_code", "elapsed_ms", "timed_out")}
+            final_command = _maven_command(worktree, case["test_args"])
+            final = _run(final_command, worktree, timeout_seconds)
+            record["final_test"] = summarize_test_run(final, final_command, worktree)
             if final["status"] == "passed":
                 record["status"] = "repaired"
             elif final["status"] == "test_failure":
@@ -269,6 +290,9 @@ def run_case(case: dict, dataset_version: str, repos_dir: Path, agent_dir: Path,
             else:
                 record["status"] = "environment_failure"
                 record["diagnostic"] = "post-repair test could not produce a test result"
+                detail = final.get("diagnostic") or record["final_test"].get("output_tail")
+                if detail:
+                    record["diagnostic"] += f": {detail[-1_000:]}"
             return record
         except (OSError, subprocess.SubprocessError) as error:
             record["diagnostic"] = str(error)

@@ -3,9 +3,11 @@ import sys
 import tempfile
 import time
 import unittest
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from unittest.mock import patch
 
-from run import classify_test, localization_metrics, parse_run_journal, stable_result, status_is_successful, _run_process
+from run import (classify_test, localization_metrics, parse_run_journal, stable_result,
+                 status_is_successful, summarize_test_run, _agent_command, _maven_command, _run_process)
 
 
 class BenchmarkHelpersTest(unittest.TestCase):
@@ -51,6 +53,42 @@ class BenchmarkHelpersTest(unittest.TestCase):
         self.assertTrue(status_is_successful("baseline_reproduced", baseline_only=True))
         self.assertFalse(status_is_successful("baseline_reproduced", baseline_only=False))
         self.assertTrue(status_is_successful("repaired", baseline_only=False))
+
+    def test_environment_failure_summary_keeps_command_and_spawn_error(self):
+        result = summarize_test_run(
+            {"status": "environment_failure", "exit_code": None, "elapsed_ms": 0,
+             "timed_out": False, "diagnostic": "[WinError 2] The system cannot find the file specified"},
+            ["mvn", "test"], Path("D:/temporary/repo"))
+
+        self.assertEqual(result["diagnostic"], "[WinError 2] The system cannot find the file specified")
+        self.assertEqual(result["command"], ["mvn", "test"])
+        self.assertEqual(result["working_directory"], str(Path("D:/temporary/repo")))
+
+    def test_windows_maven_launcher_uses_cmd_exe_for_mvn_cmd(self):
+        project = Path(__file__).parent / "_no_mvnw_temp"
+        with patch("run.os.name", "nt"):
+            command = _maven_command(project, ["-B", "test"])
+
+        self.assertEqual(command[:4], ["cmd.exe", "/d", "/c", "mvn"])
+        self.assertEqual(command[4:], ["-B", "test"])
+
+    def test_posix_maven_launcher_uses_mvn_executable(self):
+        project = Path(__file__).parent / "_no_mvnw_temp"
+        with patch("run.os.name", "posix"):
+            command = _maven_command(project, ["-B", "test"])
+
+        self.assertEqual(command, ["mvn", "-B", "test"])
+
+    def test_windows_agent_launcher_quotes_project_path_and_uses_cmd_exe(self):
+        agent_dir = Path(__file__).parent / "javafix agent"
+        worktree = PureWindowsPath("D:/work tree/rocketmq")
+        with patch("run.os.name", "nt"):
+            command = _agent_command(agent_dir, worktree, "修复路由缺陷")
+
+        self.assertEqual(command[:4], ["cmd.exe", "/d", "/c", "mvn"])
+        self.assertEqual(command[4:6], ["-q", "exec:java"])
+        self.assertIn('"D:\\\\work tree\\\\rocketmq"', command[-1])
+        self.assertIn("修复路由缺陷", command[-1])
 
     def test_timed_out_process_is_terminated_and_reported(self):
         result = _run_process([sys.executable, "-c", "import time; time.sleep(5)"],
