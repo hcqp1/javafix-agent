@@ -23,7 +23,7 @@ AgentLoop（四阶段状态机：复现 → 定位 → 修复 → 验证）
 
 ## 当前状态
 
-> 最后更新：2026-10-27
+> 最后更新：2026-11-03
 
 **已实现**
 
@@ -51,18 +51,51 @@ AgentLoop（四阶段状态机：复现 → 定位 → 修复 → 验证）
 - `Main`：命令行入口，模型配置从环境变量读取、不写进代码也不进仓库；终端只打印摘要，
   每条已完成的运行记录立即追加到用户目录下的 `.javafix-agent/runs/*.jsonl`。
 - GitHub Actions：push 到 main 与所有 PR 都会运行完整测试。
+- 基准评测：`benchmarks/dataset.json` 固定了 MyBatis M2、RocketMQ M3/M4 的缺陷版本、官方修复版本、
+  回归测试、预期失败签名和关键源码文件；`benchmarks/run.py` 在临时 Git worktree 中先确认缺陷、运行 Agent、
+  再独立复跑测试，输出 JSONL 修复结果、定位 top-k、耗时和可获得的 token 用量。当前内置集仅覆盖 Maven 案例。
 
 **进行中**
 
 - 真实仓库（如 RocketMQ、Dubbo）上的复现与定位能力仍在验证和打磨。
+- 基准运行器已就绪；尚未完成整套真实样本运行，暂不报告修复率或成本结论。
 - 上下文工程：目前只做到"观察结果限长"，按阶段裁剪上下文、检索式上下文尚未实现。
 
 **计划中**
 
 - 符号级代码定位（`find_references`、AST / Java Symbol Index）
-- 自带 Bug 样本集的构建，以及修复成功率、定位准确率、成本的评测
 - Gradle 支持
 - Context Engineering 与同类方案的对比实验
+
+## Maven Bug 基准
+
+基准集先收录 3 个带固定版本和回归测试的 Maven 案例。每个样本使用官方修复版本中的测试文件覆盖到缺陷版本，
+先运行它确认预期失败，再由 JavaFixAgent 修复，最后独立重跑相同测试。每次运行会新建临时 Git worktree，
+结束后清理临时 worktree；不会改动 `--repos-dir` 中的源文件，Git 会临时登记并随后移除 worktree 元数据。
+需要本机已克隆相应仓库并包含数据集列出的两个提交，以及 Python 3.10+、Git、JDK/Maven 和已配置好的 JavaFixAgent 模型。
+
+```powershell
+# 先只跑 M4；M2、M3 也可分别传 --case M2 / --case M3
+python benchmarks/run.py --repos-dir 'D:\yangben\_repos' --case M4 `
+  --baseline-only --output 'D:\yangben\benchmark-results\baseline.jsonl'
+
+# 确认基线能复现后，再让 Agent 修复并记录结果（会调用已配置的模型）
+python benchmarks/run.py --repos-dir 'D:\yangben\_repos' --case M4 `
+  --output 'D:\yangben\benchmark-results\javafix.jsonl'
+
+# 跑全部内置样本
+python benchmarks/run.py --repos-dir 'D:\yangben\_repos' `
+  --output 'D:\yangben\benchmark-results\javafix.jsonl'
+
+# 运行基准工具单元测试
+python -m unittest discover -s benchmarks -p test_run.py -v
+```
+
+JSONL 每行是一条运行记录。基线检查时 `status` 还可能是 `baseline_reproduced`。
+完整运行时 `status` 取 `repaired`、`repair_failed`、`environment_failure` 或
+`baseline_not_reproduced`；环境或基线问题不会混算成 Agent 修复失败。`localization.rank` 是关键源码文件
+在 Agent 读取/搜索文件顺序中的名次，`top1`/`top3` 表示是否命中；日志中没有足够轨迹时会明确记为未命中或缺失。
+`steps`、耗时和 token 数只在运行输出提供时记录。结果只代表这些固定样本和当前环境，不代表任意 Java 仓库的成功率。
 
 ## 运行时诊断范围与限制
 

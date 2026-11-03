@@ -1,0 +1,51 @@
+{
+  "version": "1",
+  "source": "Sample metadata derived from the JavaFixAgent author's local bug-sample collection; original projects and fixes belong to their upstream maintainers.",
+  "cases": [
+    {
+      "id": "M2",
+      "name": "MyBatis Kotlin enum TypeHandler resolution",
+      "repository": "mybatis-3",
+      "upstream": "https://github.com/mybatis/mybatis-3",
+      "reference": "https://github.com/mybatis/mybatis-3/pull/3673",
+      "bug_revision": "27c826d9d7f2",
+      "fix_revision": "8d648d672a1d6c97d3c936f71b8bfc6fc0bb8bb1",
+      "description": "修复 Kotlin 枚举常量带匿名方法体时，MyBatis 无法解析对应 TypeHandler 的问题。请先运行聚焦测试，再定位并修复，最后重新运行该测试验证。",
+      "test_args": ["-B", "-Dtest=TypeHandlerRegistryTest", "test"],
+      "test_selector": "TypeHandlerRegistryTest",
+      "fixture": "src/test/java/org/apache/ibatis/type/TypeHandlerRegistryTest.java",
+      "expected_failure": "TypeHandlerRegistryTest",
+      "key_files": ["src/main/java/org/apache/ibatis/type/TypeHandlerRegistry.java"]
+    },
+    {
+      "id": "M3",
+      "name": "RocketMQ timer message RocksDB cache key",
+      "repository": "rocketmq",
+      "upstream": "https://github.com/apache/rocketmq",
+      "reference": "https://github.com/apache/rocketmq/pull/10422",
+      "bug_revision": "e2137569717d",
+      "fix_revision": "bfbbb2a95535374d285e97bf2d159e00b6e26dc8",
+      "description": "修复 RocketMQ 定时消息在 RocksDB 存储层使用错误 cache key，导致不同消息数据互相覆盖或读取错误的问题。先运行聚焦测试，再定位修复并复跑测试。",
+      "test_args": ["-B", "-pl", "store", "-Dtest=MessageRocksDBStorageTest", "-Dcheckstyle.skip=true", "-Dspotbugs.skip=true", "test"],
+      "test_selector": "MessageRocksDBStorageTest",
+      "fixture": "store/src/test/java/org/apache/rocketmq/store/rocksdb/MessageRocksDBStorageTest.java",
+      "expected_failure": "MessageRocksDBStorageTest",
+      "key_files": ["store/src/main/java/org/apache/rocketmq/store/rocksdb/MessageRocksDBStorage.java"]
+    },
+    {
+      "id": "M4",
+      "name": "RocketMQ class-filter route data missing",
+      "repository": "rocketmq",
+      "upstream": "https://github.com/apache/rocketmq",
+      "reference": "https://github.com/apache/rocketmq/pull/10420",
+      "bug_revision": "c270c60f8592",
+      "fix_revision": "e2137569717df3567fc51629d7ee3c9b36724628",
+      "description": "修复消费者使用类过滤拉取消息时，路由数据缺少过滤信息可能使 PullAPIWrapper 抛出 NullPointerException 的问题。先运行 PullAPIWrapperTest，再定位修复并重新运行该测试。",
+      "test_args": ["-B", "-pl", "client", "-am", "-Dtest=PullAPIWrapperTest", "-DfailIfNoTests=false", "-Dcheckstyle.skip=true", "-Dspotbugs.skip=true", "test"],
+      "test_selector": "PullAPIWrapperTest",
+      "fixture": "client/src/test/java/org/apache/rocketmq/client/impl/consumer/PullAPIWrapperTest.java",
+      "expected_failure": "testPullKernelImplWithMissingFilterServerTableForClassFilter",
+      "key_files": ["client/src/main/java/org/apache/rocketmq/client/impl/consumer/PullAPIWrapper.java"]
+    }
+  ]
+}

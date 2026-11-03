@@ -219,6 +219,8 @@ __marimo__/
 
 # ===== Java / Maven =====
 target/
+benchmarks/results/
+benchmarks/worktrees/
 *.class
 *.jar
 *.war
