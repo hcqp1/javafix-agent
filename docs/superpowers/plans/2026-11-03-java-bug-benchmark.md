@@ -52,7 +52,7 @@
 - Modify: `README.md`
 
 - [x] Run benchmark unit tests and Java project tests.
-- [ ] Run one selected sample only if the required local repository and model configuration are available; otherwise document the exact blocked prerequisite without fabricating a result.
+- [x] Attempt the model-free M4 baseline check; this execution environment denies Git access to `D:\yangben\_repos\rocketmq` (`Permission denied`), so no live sample result is claimed. The user can run the documented command locally.
 - [x] Inspect `git diff --check` and confirm no API key is present in tracked files. The README contains the user-provided sample directory as a command example.
 
 ## Self-Review
