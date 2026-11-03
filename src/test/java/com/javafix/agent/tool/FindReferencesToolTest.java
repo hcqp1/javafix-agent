@@ -61,6 +61,22 @@ class FindReferencesToolTest {
     }
 
     @Test
+    void resolvesNestedTypeCallsThroughExplicitImports() throws IOException {
+        write("src/main/java/q/Outer.java", "package q; public class Outer { public static class Inner { public static void run() {} } }");
+        write("src/main/java/p/NestedCaller.java", """
+                package p;
+                import q.Outer;
+                class NestedCaller { void call() { Outer.Inner.run(); } }
+                """);
+
+        String correct = tool().execute(Map.of("type", "q.Outer.Inner", "method", "run"));
+        String wrong = tool().execute(Map.of("type", "p.Outer.Inner", "method", "run"));
+
+        assertTrue(correct.contains("src/main/java/p/NestedCaller.java:3"), correct);
+        assertTrue(!wrong.contains("src/main/java/p/NestedCaller.java"), wrong);
+    }
+
+    @Test
     void limitsResultsAndReportsWhenMoreCandidatesExist() throws IOException {
         write("src/main/java/p/Foo.java", "package p; class Foo { void run() {} void run(int n) {} }");
 

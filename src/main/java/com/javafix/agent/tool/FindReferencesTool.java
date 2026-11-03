@@ -237,6 +237,12 @@ public final class FindReferencesTool extends ProjectTool {
         if (name.contains(".")) {
             if (!packageName.isEmpty() && name.startsWith(packageName + ".")) return name;
             String firstPart = name.substring(0, name.indexOf('.'));
+            for (var imported : unit.getImports()) {
+                if (!imported.isStatic() && !imported.isAsterisk()
+                        && simpleName(imported.getNameAsString()).equals(firstPart)) {
+                    return imported.getNameAsString() + name.substring(firstPart.length());
+                }
+            }
             if (!packageName.isEmpty() && !firstPart.isEmpty() && Character.isUpperCase(firstPart.charAt(0))) {
                 return packageName + "." + name;
             }
