@@ -8,6 +8,7 @@ import com.javafix.agent.core.AgentLoop;
 import com.javafix.agent.llm.LlmClient;
 import com.javafix.agent.llm.OpenAiCompatibleLlmClient;
 import com.javafix.agent.tool.MavenTestRunner;
+import com.javafix.agent.tool.FindReferencesTool;
 import com.javafix.agent.tool.ReadFileTool;
 import com.javafix.agent.tool.ReplaceInFileTool;
 import com.javafix.agent.tool.RunTestsTool;
@@ -135,6 +136,7 @@ public class Main {
     public static List<Tool> createTools(Path project) {
         return List.of(
                 new ReadFileTool(project),
+                new FindReferencesTool(project),
                 new ReplaceInFileTool(project),
                 new SearchCodeTool(project),
                 new WriteFileTool(project),

@@ -54,6 +54,8 @@ AgentLoop（四阶段状态机：复现 → 定位 → 修复 → 验证）
 - 基准评测：`benchmarks/dataset.json` 固定了 MyBatis M2、RocketMQ M3/M4 的缺陷版本、官方修复版本、
   回归测试、预期失败签名和关键源码文件；`benchmarks/run.py` 在临时 Git worktree 中先确认缺陷、运行 Agent、
   再独立复跑测试，输出 JSONL 修复结果、定位 top-k、耗时和可获得的 token 用量。当前内置集仅覆盖 Maven 案例。
+- Java 符号定位：`find_references` 使用 JavaParser 在仓库内定位指定类型/方法的声明和语法上可识别的调用候选，
+  支持限定源码路径、结果条数上限，并在部分文件解析失败时保留其他结果；定位阶段会优先调用它，无法解析或绑定时回退到 `search_code`。
 
 **进行中**
 
@@ -63,9 +65,13 @@ AgentLoop（四阶段状态机：复现 → 定位 → 修复 → 验证）
 
 **计划中**
 
-- 符号级代码定位（`find_references`、AST / Java Symbol Index）
+- 完整 Java Symbol Index 与跨模块、继承、泛型等语义级引用解析
 - Gradle 支持
 - Context Engineering 与同类方案的对比实验
+
+`find_references` 当前使用 Java 17 语法解析，最多扫描 3000 个 Java 文件、单文件 1 MiB、每次返回最多 30 条结果。
+它依据源码中的类型声明、参数/变量类型和显式接收者产生候选，不加载 Maven/Gradle classpath，也不处理完整的继承、泛型推断或动态绑定；
+因此结果用于缩小搜索范围，仍需用源码、测试及 `search_code` 复核。
 
 ## Maven Bug 基准
 
