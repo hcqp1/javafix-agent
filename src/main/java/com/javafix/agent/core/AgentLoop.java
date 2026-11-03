@@ -84,6 +84,7 @@ public class AgentLoop {
     private final List<Tool> tools;
     private final int maxSteps;
     private final List<String> transcript = new ArrayList<>();
+    private final PromptContextAssembler contextAssembler = new PromptContextAssembler();
 
     private record FailedAttempt(int round, String plan, String testScope, String feedback) {
         String summary() {
@@ -595,10 +596,12 @@ public class AgentLoop {
 
         prompt.append("\n用户报告的现象：\n").append(symptom).append("\n\n");
 
-        if (!priorTaskContext.isEmpty()) {
-            prompt.append("本任务此前的对话与结果（仅作为背景；当前工作区和本轮验证优先）：\n");
-            priorTaskContext.forEach(item -> prompt.append("- ").append(item).append('\n'));
-            prompt.append('\n');
+        List<String> failedAttemptSummaries = failedAttempts.stream().map(FailedAttempt::summary).toList();
+        String selectedContext = contextAssembler.assemble(
+                phase, symptom, transcript, priorTaskContext, failedAttemptSummaries);
+        if (!selectedContext.isBlank()) {
+            prompt.append("本任务相关上下文（按当前阶段筛选；当前用户报告和工作区优先）：\n")
+                    .append(selectedContext).append('\n');
         }
 
         prompt.append("可用工具：\n");
@@ -607,20 +610,6 @@ public class AgentLoop {
         }
 
         prompt.append(ACTION_FORMAT);
-
-        if (lastSummary != null) {
-            prompt.append("\n上一阶段的结论：").append(lastSummary).append('\n');
-        }
-
-        if (!failedAttempts.isEmpty()) {
-            prompt.append("\n失败尝试（先分析未通过的原因，再提出不同的修复方案）：\n");
-            failedAttempts.forEach(attempt -> prompt.append("- ").append(attempt.summary()).append('\n'));
-        }
-
-        if (!transcript.isEmpty()) {
-            prompt.append("\n到目前为止的进展：\n");
-            transcript.forEach(entry -> prompt.append(entry).append('\n'));
-        }
 
         return prompt.toString();
     }

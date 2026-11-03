@@ -32,6 +32,21 @@ class AgentLoopTest {
     Path project;
 
     @Test
+    void boundsPriorPhaseConclusionInTheActualModelPrompt() {
+        String longSummary = "LONG_SUMMARY_START" + "x".repeat(12_000) + "LONG_SUMMARY_END";
+        ScriptedLlmClient llm = new ScriptedLlmClient(
+                "FINAL: " + longSummary,
+                "FINAL: 已完成定位");
+        AgentLoop loop = new AgentLoop(llm, List.of(new SearchCodeTool(project)), 2);
+
+        loop.run("示例缺陷");
+
+        String nextPhasePrompt = llm.prompts().get(1);
+        assertFalse(nextPhasePrompt.contains("x".repeat(2_000)), nextPhasePrompt.length() + "");
+        assertTrue(nextPhasePrompt.length() < 12_000, Integer.toString(nextPhasePrompt.length()));
+    }
+
+    @Test
     void localizationPromptOffersBoundedTraceOnlyAfterMethodAndFocusedTestAreKnown() {
         TestRunner failingTests = path -> new TestResult(1,
                 "Tests run: 1, Failures: 1, Errors: 0, Skipped: 0", "");
