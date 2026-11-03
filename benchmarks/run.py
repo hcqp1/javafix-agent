@@ -171,6 +171,15 @@ def summarize_test_run(result: dict, command: list[str], cwd: Path) -> dict:
     return summary
 
 
+def summarize_agent_run(result: dict, command: list[str], cwd: Path, include_output: bool = False) -> dict:
+    summary = {key: result[key] for key in ("exit_code", "elapsed_ms", "timed_out")}
+    summary["command"] = command
+    summary["working_directory"] = str(cwd)
+    if include_output and result.get("output"):
+        summary["output_tail"] = result["output"][-4_000:]
+    return summary
+
+
 def _agent_metrics(output: str) -> dict:
     values = {}
     model = re.search(r"模型：([^\r\n]+)", output)
@@ -269,20 +278,33 @@ def run_case(case: dict, dataset_version: str, repos_dir: Path, agent_dir: Path,
                 return record
 
             command = _agent_command(agent_dir, worktree, case["description"])
+            record["agent_process"] = {"command": command, "working_directory": str(agent_dir)}
             agent_started = time.monotonic()
-            agent = _run_process(command, agent_dir, timeout_seconds)
+            try:
+                agent = _run_process(command, agent_dir, timeout_seconds)
+            except (OSError, subprocess.SubprocessError) as error:
+                record["diagnostic"] = f"JavaFixAgent process could not start: {error}"
+                return record
             agent_output = agent["output"]
+            has_conclusion = "=== Agent 的结论 ===" in agent_output
+            record["agent_process"] = summarize_agent_run(
+                agent, command, agent_dir,
+                include_output=agent["timed_out"] or agent["exit_code"] != 0 or not has_conclusion)
             record["agent_process_exit_code"] = agent["exit_code"]
             if agent["timed_out"]:
                 record["status"] = "environment_failure"
                 record["diagnostic"] = "JavaFixAgent process timed out"
+                if record["agent_process"].get("output_tail"):
+                    record["diagnostic"] += f"\nAgent output tail:\n{record['agent_process']['output_tail'][-1_000:]}"
                 return record
             metrics = _agent_metrics(agent_output)
             journal = metrics.pop("journal", None)
             record.update(metrics)
-            if "=== Agent 的结论 ===" not in agent_output:
+            if not has_conclusion:
                 record["status"] = "environment_failure"
                 record["diagnostic"] = "JavaFixAgent did not start a repair run; check Maven and model configuration"
+                if record["agent_process"].get("output_tail"):
+                    record["diagnostic"] += f"\nAgent output tail:\n{record['agent_process']['output_tail'][-1_000:]}"
                 return record
             if journal:
                 record["localization"] = localization_metrics(

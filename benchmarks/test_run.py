@@ -7,7 +7,8 @@ from pathlib import Path, PureWindowsPath
 from unittest.mock import patch
 
 from run import (classify_test, localization_metrics, parse_run_journal, stable_result,
-                 status_is_successful, summarize_test_run, _agent_command, _maven_command, _run_process)
+                 status_is_successful, summarize_test_run, summarize_agent_run,
+                 _agent_command, _maven_command, _run_process)
 
 
 class BenchmarkHelpersTest(unittest.TestCase):
@@ -86,6 +87,17 @@ class BenchmarkHelpersTest(unittest.TestCase):
             ["mvn", "test"], Path("D:/temporary/repo"))
 
         self.assertIn("ExpectedMethodName failed", result["output_tail"])
+
+    def test_agent_failure_summary_keeps_command_and_output_tail(self):
+        result = summarize_agent_run(
+            {"exit_code": 255, "elapsed_ms": 12, "timed_out": False,
+             "output": "Maven could not start Agent main"},
+            ["cmd.exe", "/d", "/c", "mvn", "exec:java"], Path("C:/javafix-agent"), include_output=True)
+
+        self.assertEqual(result["exit_code"], 255)
+        self.assertEqual(result["command"][-1], "exec:java")
+        self.assertEqual(result["working_directory"], str(Path("C:/javafix-agent")))
+        self.assertIn("could not start Agent", result["output_tail"])
 
     def test_windows_maven_launcher_uses_cmd_exe_for_mvn_cmd(self):
         project = Path(__file__).parent / "_no_mvnw_temp"
