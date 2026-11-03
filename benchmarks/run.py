@@ -26,12 +26,18 @@ ENVIRONMENT_ERROR = re.compile(
     r"JAVA_HOME.*(?:not defined|incorrect)|BUILD FAILURE.*(?:compilation|dependency)",
     re.IGNORECASE | re.DOTALL,
 )
+FORKED_VM_ERROR = re.compile(
+    r"The forked VM terminated without properly saying goodbye|There was an error in the forked process",
+    re.IGNORECASE,
+)
 JAVA_FILE = re.compile(r"(?<![\w.-])([\w./\\$-]+\.java)(?=[:#])")
 
 
 def classify_test(exit_code: int, output: str) -> str:
     if exit_code == 0:
         return "passed" if PASSED_SUMMARY.search(output) else "environment_failure"
+    if FORKED_VM_ERROR.search(output):
+        return "environment_failure"
     if FAILED_SUMMARY.search(output):
         return "test_failure"
     if PASSED_SUMMARY.search(output):

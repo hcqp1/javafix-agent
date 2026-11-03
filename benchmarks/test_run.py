@@ -14,10 +14,17 @@ class BenchmarkHelpersTest(unittest.TestCase):
     def test_distinguishes_test_failure_from_environment_failure(self):
         failed = "[ERROR] Tests run: 2, Failures: 1, Errors: 0\nBUILD FAILURE"
         environment = "Could not resolve dependencies\nBUILD FAILURE"
+        fork_crash = ("[ERROR] Tests run: 2, Failures: 1, Errors: 0\n"
+                      "The forked VM terminated without properly saying goodbye. VM crash or System.exit called?")
+        failure_with_dependency_path = (
+            "[ERROR] Tests run: 2, Failures: 1, Errors: 0\nBUILD FAILURE\n"
+            "See C:\\work\\dependency-tools\\target\\surefire-reports")
         post_test_failure = "Tests run: 2, Failures: 0, Errors: 0\nCheckstyle failed\nBUILD FAILURE"
 
         self.assertEqual(classify_test(1, failed), "test_failure")
         self.assertEqual(classify_test(1, environment), "environment_failure")
+        self.assertEqual(classify_test(1, fork_crash), "environment_failure")
+        self.assertEqual(classify_test(1, failure_with_dependency_path), "test_failure")
         self.assertEqual(classify_test(1, post_test_failure), "environment_failure")
         self.assertEqual(classify_test(0, "Tests run: 2, Failures: 0, Errors: 0"), "passed")
 
