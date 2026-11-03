@@ -99,7 +99,7 @@ python benchmarks/run.py --repos-dir 'D:\yangben\_repos' `
 python -m unittest discover -s benchmarks -p test_run.py -v
 ```
 
-  JSONL 每行是一条运行记录；环境失败记录会附带执行命令、工作目录和启动错误或末尾输出，便于排查。基线检查时 `status` 还可能是 `baseline_reproduced`。
+  JSONL 每行是一条运行记录；未通过的测试记录会附带执行命令、工作目录和错误诊断或末尾输出，便于排查。基线检查时 `status` 还可能是 `baseline_reproduced`。
 完整运行时 `status` 取 `repaired`、`repair_failed`、`environment_failure` 或
 `baseline_not_reproduced`；环境或基线问题不会混算成 Agent 修复失败。`localization.rank` 是关键源码文件
 在 Agent 读取/搜索文件顺序中的名次，`top1`/`top3` 表示是否命中；日志中没有足够轨迹时会明确记为未命中或缺失。

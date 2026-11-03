@@ -160,7 +160,7 @@ def summarize_test_run(result: dict, command: list[str], cwd: Path) -> dict:
     summary["working_directory"] = str(cwd)
     if result.get("diagnostic"):
         summary["diagnostic"] = result["diagnostic"]
-    if result["status"] == "environment_failure" and result.get("output"):
+    if result["status"] != "passed" and result.get("output"):
         summary["output_tail"] = result["output"][-2_000:]
     return summary
 
@@ -254,6 +254,9 @@ def run_case(case: dict, dataset_version: str, repos_dir: Path, agent_dir: Path,
             if baseline["status"] != "test_failure" or not record["baseline_signature_matched"]:
                 record["status"] = "baseline_not_reproduced"
                 record["diagnostic"] = "the pinned baseline did not show the expected failing test"
+                detail = record["baseline"].get("output_tail") or baseline.get("output", "")[-1_000:]
+                if detail:
+                    record["diagnostic"] += f"\nBaseline output tail:\n{detail[-1_000:]}"
                 return record
             if baseline_only:
                 record["status"] = "baseline_reproduced"

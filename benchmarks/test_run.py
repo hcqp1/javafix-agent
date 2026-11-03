@@ -64,6 +64,14 @@ class BenchmarkHelpersTest(unittest.TestCase):
         self.assertEqual(result["command"], ["mvn", "test"])
         self.assertEqual(result["working_directory"], str(Path("D:/temporary/repo")))
 
+    def test_nonpassing_test_summary_keeps_output_tail(self):
+        result = summarize_test_run(
+            {"status": "test_failure", "exit_code": 1, "elapsed_ms": 100,
+             "timed_out": False, "output": "build output\nExpectedMethodName failed"},
+            ["mvn", "test"], Path("D:/temporary/repo"))
+
+        self.assertIn("ExpectedMethodName failed", result["output_tail"])
+
     def test_windows_maven_launcher_uses_cmd_exe_for_mvn_cmd(self):
         project = Path(__file__).parent / "_no_mvnw_temp"
         with patch("run.os.name", "nt"):
